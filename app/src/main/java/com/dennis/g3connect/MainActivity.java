@@ -75,6 +75,7 @@ public final class MainActivity extends Activity {
     private int readStep;
     private final int[] readIndexes = {0x55,0x62,0x5F,0x6B,0x5A,0x70,0x42,0x49,0x76,0x4A};
     private final int[] readLengths = {2,4,2,2,2,2,2,2,2,2};
+    private TextView rideData, settingsData;
     private final Runnable operationTimeout = () -> {
         if(waitingCommand<0)return;
         int failed=waitingCommand;
@@ -107,7 +108,7 @@ public final class MainActivity extends Activity {
     private int scanCallbacks;
     private final Runnable scanTimeout = this::stopScan;
     private int packetCount;
-    private TextView status, details, log, protocolStatus, rideData, settingsData;
+    private TextView status, details, log, protocolStatus;
     private EditText pairingKey;
     private Button probeButton, authButton, readButton;
     private LinearLayout deviceList;
