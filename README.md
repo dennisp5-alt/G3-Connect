@@ -1,49 +1,37 @@
-# G3 Connect — v0.1.2 diagnostic
+# G3 Connect v0.2.0 — read-only protocol test
 
-Private, on-device Android Bluetooth Low Energy (BLE) scanner for the **Segway Ninebot MAX G3**. Designed for testing on a Samsung Galaxy S23 Ultra, and usable for basic BLE discovery of other scooters such as the G30P.
+Android native Bluetooth Low Energy utility for the MAX G3. This build is **experimental and read-only**. It never registers a new pairing password, changes scooter settings, flashes firmware, or changes your Segway account binding.
 
-## What works at this stage
+## Functions
+- Scan nearby BLE devices (requires Bluetooth, Nearby Devices and Precise Location permission, and Location turned on)
+- BLE GATT connect and service/characteristic diagnostics
+- Request a higher MTU, subscribe to the G3 notification channel, and reassemble incoming packets
+- **PROBE**: attempt non-mutating PRE_COMM handshake on Ninebot Encryption2 Gen3 and report whether a stored key exists
+- **AUTHENTICATE USING EXISTING KEY**: optional, uses an existing 16-byte pairing key expressed as 32 hex digits, and does not issue SET_PWD. If the scooter requires the key to be reasserted, authentication may time out; this app will not overwrite it.
+- **READ DATA** after successful authentication: battery percentage, odometer and remaining range (G3-tested register indexes); no setting writes
+- Safe local diagnostics with Bluetooth MACs and selected scooter name redacted from the share text
 
-- Scan nearby BLE devices and choose one to connect.
-- Establish a GATT link, discover services/characteristics, report UART candidates and MTU.
-- Subscribe to one known UART notification characteristic if supported; count packets (do not decode them).
-- Export a diagnostic log with Bluetooth MAC addresses redacted.
+## How to test
+1. Install the APK release. Turn on Bluetooth and Location. Allow **Nearby devices** and **Precise location**.
+2. Power on your scooter and force-stop the official Segway app (Bluetooth connection only allows one app at a time).
+3. Tap SCAN, select the device that is definitely your G3, and wait for the protocol status "Gen3 service ready".
+4. Tap **PROBE**. Watch for a response like "G3 protocol reply verified; serial …; stored password: true".
+5. With a *legitimately recovered existing* pairing key, enter 32 hex characters in the app and tap **AUTHENTICATE USING EXISTING KEY**. Do not paste the key into a chat, screenshot, GitHub issue, or shared diagnostic file.
+6. If AUTH succeeds, tap **READ DATA** and report the displayed values to check accuracy against the scooter.
+7. If PRE_COMM times out, share the diagnostic log. A BLE connection alone does not confirm protocol authentication.
 
-**Not yet implemented:** Segway encrypted authentication, scooter telemetry, pairing passwords, settings reads/writes, changing account binding, firmware modifications. A BLE GATT connection **does not** mean you are logged into the scooter.
+### Key points
+- The advertising name is part of the Generation 3 session crypto; selecting an unnamed or wrong device cannot complete the probe.
+- This build **does not recover pairing keys**, and does not intentionally bypass scooter ownership. It can reuse a key you legitimately possess. Android's normal Segway app storage is not accessible without privileges.
+- G3 service: \`6e400001-0000-0000-006e-696e65626f74\`. G3 write: \`6e400002-0000-0000-006e-696e65626f74\`. G3 notify: \`6e400004-0000-0000-006e-696e65626f74\`. It does not send protocol commands on the classic Nordic UART service.
+- The only BLE control write during setup is the standard GATT CCCD subscription that enables notifications; all Ninebot protocol requests are PRE_COMM, AUTH and READ.
+- Use a scooter that is parked and powered on. This is not a riding dashboard; no Android foreground service is used.
 
-## Build APK
+## APK
+Each push builds with GitHub Actions, publishes an Actions artifact, and, on success, updates a direct APK release.
 
-Every push to `main` runs **Actions → Build Android APK**. Download the `G3-Connect-v0.1.2-Diagnostic-APK` Actions artifact and extract `app-debug.apk`. The artifact is a ZIP containing the APK; do not install the ZIP itself.
+## Reference
+Protocol independently implemented for Android from published **MIT-licensed** work at https://codeberg.org/NootNooot/segway-ninebot-ble. Verified G3 services, handshake expectations and register indexes cross-checked against https://github.com/BobMcGlobus/ha-ninebot (AGPL-3.0). No AGPL source was copied into this app.
 
-Alternatively build with Android Studio using Java 17, Gradle 8.11.1, Android Gradle Plugin 8.9.2 and Android SDK 35.
-
-## Test steps
-
-1. Install the APK. Enable Bluetooth and grant *Nearby devices* and *Precise location* permissions.
-2. Turn the G3 on and fully close the official Segway app.
-3. Tap **SCAN**, then tap the device matching your scooter. BLE names may be empty; use proximity/signal strength.
-4. Inspect the **Bluetooth connection** details and **Local diagnostic log**. On Android, some BLE devices are visible only when advertising.
-5. Use **SHARE LOG** if you want to show diagnostics. Review before sharing. Do **not** publish scooter pairing passwords, account credentials, or unredacted identifiers.
-
-## Safety
-
-All scooter-configuration controls are disabled in this milestone. No authentication commands or motor/firmware changes are sent. The only BLE write is an optional standard Client Characteristic Configuration Descriptor subscription to a notification channel. Leave the scooter parked for testing.
-
-## Roadmap
-
-- v0.2: identify the G3 service and confirm the Gen2 authenticated protocol on this scooter/firmware.
-- Then implement verified telemetry and safe, range-checked controls with readback for energy recovery, start speed, charge limit, auto power-off and sound volume, subject to supported firmware and correct authentication.
-
-Reverse-engineering reference: [ha-ninebot](https://github.com/BobMcGlobus/ha-ninebot) (AGPL-3.0); this project does not copy third-party protocol implementation.
-
-## 0.1.2 scan troubleshooting
-Version 0.1.1 received zero BLE advertisement callbacks on a Galaxy S23 Ultra. This version improves visibility into the cause:
-- Declare and request *Precise location* in addition to *Nearby devices*, without `neverForLocation` advertisement filtering. No GPS/location data is collected or uploaded.
-- Warn if Location services are off. Turn on Android's global **Location** switch (Quick Settings) before scanning.
-- **SYSTEM CHECK** reports Bluetooth support/state, Android version, location toggle, runtime permissions.
-- **SCAN** operates up to 25 seconds with extended advertisements included and reports callbacks and unique devices.
-- **PAIRED** lists already-bonded Bluetooth devices as a separate diagnostic (not proof of scooter authorization).
-- **LOCATION** opens Android's system Location settings.
-- Hold the screen awake during scanning; unfiltered BLE scans can be paused by Android when the screen is off.
-- Close Segway and other apps connected to the scooter, power on scooter, stand close, try only one scan initially.
-If other BLE peripherals are also missing, test a trusted scanner such as nRF Connect to separate phone/permissions issues from app code. If nRF Connect finds none, check the system Location and Nearby devices settings, and restart phone Bluetooth.
+## Next
+On-device PRE_COMM confirmation, AES authentication validation, and reliable readback. Only then consider adding safety-checked settings writes.
