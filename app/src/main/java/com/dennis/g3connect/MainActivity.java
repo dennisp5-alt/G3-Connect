@@ -56,12 +56,18 @@ public final class MainActivity extends Activity {
     private static final UUID CCCD = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
     private static final UUID G3_WRITE = UUID.fromString("6e400002-0000-0000-006e-696e65626f74");
     private static final UUID G3_NOTIFY = UUID.fromString("6e400004-0000-0000-006e-696e65626f74");
+    private static final UUID NORDIC_WRITE = UUID.fromString("6e400002-b5a3-f393-e0a9-e50e24dcca9e");
+    private static final UUID NORDIC_NOTIFY = UUID.fromString("6e400003-b5a3-f393-e0a9-e50e24dcca9e");
     private final NinebotProbe protocol = new NinebotProbe();
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ArrayDeque<BluetoothGattDescriptor> subscriptions = new ArrayDeque<>();
     private final ByteArrayOutputStream recvBuffer = new ByteArrayOutputStream();
-    private BluetoothGattCharacteristic g3Write;
-    private boolean notifyReady;
+    private BluetoothGattCharacteristic g3Write, nordicWrite, activeWrite;
+    private UUID activeNotification = G3_NOTIFY;
+    private int activeWriteType=BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE;
+    private boolean notifyReady, g3NotifyReady, nordicNotifyReady;
+    private boolean probeActive;
+    private int probeAttempt=-1, mtuSize=23, g3Rx, nordicRx;
     private boolean subscribing;
     private String selectedName;
     private int waitingCommand=-1;
@@ -70,12 +76,18 @@ public final class MainActivity extends Activity {
     private final int[] readIndexes = {0x55, 0x62, 0x5F};
     private final int[] readLengths = {2, 4, 2};
     private final Runnable operationTimeout = () -> {
-        if(waitingCommand<0) return;
-        int failed=waitingCommand;waitingCommand=-1;
-        record("Protocol timeout waiting for response to 0x"+Integer.toHexString(failed));
-        if(failed==NinebotProbe.AUTH) setProtocolStatus("Authentication unanswered — wrong key, or scooter needs key reassertion. No pairing was attempted.");
-        else if(failed==NinebotProbe.PRE_COMM) setProtocolStatus("No Gen3 PRE_COMM response. Confirm scooter identity and advertising name.");
-        else setProtocolStatus("Read timed out — scooter may have disconnected");
+        if(waitingCommand<0)return;
+        int failed=waitingCommand;
+        waitingCommand=-1;
+        record("Timeout waiting for 0x"+Integer.toHexString(failed)+
+               "; G3 RX="+g3Rx+" Nordic RX="+nordicRx);
+        if(failed==NinebotProbe.PRE_COMM && probeActive) {
+            handler.post(this::nextProbeAttempt);
+        }else if(failed==NinebotProbe.AUTH) {
+            setProtocolStatus("AUTH unanswered: existing key may be wrong or firmware needs reassertion; no pairing attempted.");
+        }else {
+            setProtocolStatus("Read timed out; G3 may have disconnected.");
+        }
     };
     private final Set<String> addresses = new HashSet<>();
     private final StringBuilder diagnostics = new StringBuilder();
@@ -102,7 +114,7 @@ public final class MainActivity extends Activity {
         BluetoothManager manager = (BluetoothManager) getSystemService(BLUETOOTH_SERVICE);
         adapter = manager == null ? null : manager.getAdapter();
         buildUi();
-        record("G3 Connect v0.2.0 — diagnostic mode");
+        record("G3 Connect v0.2.1 — diagnostic mode");
         if (adapter == null) setStatus("Bluetooth unavailable");
         systemCheck();
     }
@@ -370,7 +382,10 @@ public final class MainActivity extends Activity {
         stopScan(); disconnect();
         protocol.reset();
         selectedName=name.equals("Unnamed BLE device")?null:name;
-        g3Write=null;notifyReady=false;recvBuffer.reset();subscriptions.clear();
+        g3Write=null;nordicWrite=null;activeWrite=null;
+        probeActive=false;probeAttempt=-1;mtuSize=23;g3Rx=0;nordicRx=0;
+        notifyReady=false;g3NotifyReady=false;nordicNotifyReady=false;
+        recvBuffer.reset();subscriptions.clear();subscribing=false;
         probeButton.setEnabled(false);authButton.setEnabled(false);readButton.setEnabled(false);
         setProtocolStatus("Connecting BLE; scooter authentication not started.");
         rideData.setText("No scooter telemetry yet.");
@@ -387,11 +402,13 @@ public final class MainActivity extends Activity {
     private void disconnect() {
         handler.removeCallbacks(operationTimeout);
         waitingCommand=-1;
+        probeActive=false;
         BluetoothGatt previous=gatt; gatt=null;
         if(previous!=null) {
             try {previous.disconnect();previous.close();} catch(RuntimeException ignored){}
         }
-        protocol.reset();notifyReady=false;g3Write=null;
+        protocol.reset();notifyReady=false;g3NotifyReady=false;nordicNotifyReady=false;
+        g3Write=null;nordicWrite=null;activeWrite=null;subscribing=false;
         if(disconnectButton!=null) disconnectButton.setEnabled(false);
         if(probeButton!=null)probeButton.setEnabled(false);
         if(authButton!=null)authButton.setEnabled(false);
@@ -408,7 +425,8 @@ public final class MainActivity extends Activity {
                     if(gatt==client) gatt=null;
                     disconnectButton.setEnabled(false);
                 });
-                protocol.reset();notifyReady=false;g3Write=null;
+                protocol.reset();notifyReady=false;g3Write=null;nordicWrite=null;
+                probeActive=false;activeWrite=null;subscribing=false;
                 handler.removeCallbacks(operationTimeout);waitingCommand=-1;
                 runOnUiThread(() -> {
                     probeButton.setEnabled(false);authButton.setEnabled(false);readButton.setEnabled(false);
@@ -447,8 +465,11 @@ public final class MainActivity extends Activity {
             record("Discovered "+client.getServices().size()+" GATT services; UART="+uart);
             BluetoothGattService g3service=client.getService(G3_UART);
             g3Write=g3service==null?null:g3service.getCharacteristic(G3_WRITE);
-            if(g3Write!=null)record("G3 Gen3 write characteristic present; awaiting notification setup");
-            else setProtocolStatus("Selected device has no G3 Gen3 write characteristic");
+            BluetoothGattService nordicService=client.getService(NORDIC_UART);
+            nordicWrite=nordicService==null?null:nordicService.getCharacteristic(NORDIC_WRITE);
+            record("Gen3 write present="+(g3Write!=null)+", Nordic write present="+(nordicWrite!=null));
+            if(g3Write==null&&nordicWrite==null)
+                setProtocolStatus("Selected device has no supported scooter write characteristic");
             try {
                 if(!client.requestMtu(247)) {
                     record("MTU request failed to start; try standard notification subscription");
@@ -458,13 +479,17 @@ public final class MainActivity extends Activity {
         }
         @Override public void onMtuChanged(BluetoothGatt client,int mtu,int code) {
             if(client!=gatt) return;
+            if(code==BluetoothGatt.GATT_SUCCESS)mtuSize=mtu;
             record("Negotiated MTU: "+mtu+" (status "+code+")");
             subscribe(client);
         }
         @Override public void onDescriptorWrite(BluetoothGatt client,BluetoothGattDescriptor d,int code) {
             if(client!=gatt)return;
             if(d.getCharacteristic().getUuid().equals(G3_NOTIFY) && code==BluetoothGatt.GATT_SUCCESS)
-                notifyReady=true;
+                g3NotifyReady=true;
+            if(d.getCharacteristic().getUuid().equals(NORDIC_NOTIFY) && code==BluetoothGatt.GATT_SUCCESS)
+                nordicNotifyReady=true;
+            notifyReady=g3NotifyReady||nordicNotifyReady;
             record("Notify "+d.getCharacteristic().getUuid()+": "+code);
             subscribeNext(client);
         }
@@ -473,8 +498,10 @@ public final class MainActivity extends Activity {
             if(client!=gatt)return;
             if(statusCode!=BluetoothGatt.GATT_SUCCESS) {
                 record("Protocol write rejected (GATT status="+statusCode+")");
+                int failed=waitingCommand;
                 handler.removeCallbacks(operationTimeout);waitingCommand=-1;
-                setProtocolStatus("Bluetooth write failed (status "+statusCode+")");
+                if(failed==NinebotProbe.PRE_COMM && probeActive) handler.post(MainActivity.this::nextProbeAttempt);
+                else setProtocolStatus("Bluetooth write failed (status "+statusCode+")");
             }
         }
         @Override public void onCharacteristicChanged(BluetoothGatt client,BluetoothGattCharacteristic ch,byte[] data) {
@@ -490,23 +517,24 @@ public final class MainActivity extends Activity {
     }
     private void subscribe(BluetoothGatt client) {
         if(subscribing)return;
-        subscribing=true;subscriptions.clear();notifyReady=false;
-        BluetoothGattService service=client.getService(G3_UART);
-        BluetoothGattCharacteristic target=service==null?null:service.getCharacteristic(G3_NOTIFY);
-        if(target!=null &&
-                (target.getProperties()&BluetoothGattCharacteristic.PROPERTY_NOTIFY)!=0) {
-            BluetoothGattDescriptor desc=target.getDescriptor(CCCD);
-            if(desc!=null) subscriptions.add(desc);
-        }
-        // The verified G3 notification characteristic is 004 on the Ninebot service.
-        // Do not mix notification fragments from unrelated UART channels.
+        subscribing=true;subscriptions.clear();
+        notifyReady=false;g3NotifyReady=false;nordicNotifyReady=false;
+        addNotification(client,G3_UART,G3_NOTIFY);
+        addNotification(client,NORDIC_UART,NORDIC_NOTIFY);
         if(subscriptions.isEmpty()) {
             subscribing=false;
-            setProtocolStatus("The expected G3 notify characteristic is unavailable");
-            record("No verified G3 notify channel; probe disabled");
+            setProtocolStatus("No known G3 or Nordic notification channel found");
+            record("Cannot probe without a notification channel");
             return;
         }
         subscribeNext(client);
+    }
+    private void addNotification(BluetoothGatt client,UUID serviceUuid,UUID notifyUuid) {
+        BluetoothGattService service=client.getService(serviceUuid);
+        BluetoothGattCharacteristic ch=service==null?null:service.getCharacteristic(notifyUuid);
+        if(ch==null || (ch.getProperties()&BluetoothGattCharacteristic.PROPERTY_NOTIFY)==0)return;
+        BluetoothGattDescriptor descriptor=ch.getDescriptor(CCCD);
+        if(descriptor!=null)subscriptions.add(descriptor);
     }
     @SuppressWarnings("deprecation")
     private void subscribeNext(BluetoothGatt client) {
@@ -514,18 +542,19 @@ public final class MainActivity extends Activity {
         BluetoothGattDescriptor d=subscriptions.poll();
         if(d==null) {
             subscribing=false;
-            record("G3 notification setup complete: "+notifyReady);
+            record("Subscription summary: Gen3="+g3NotifyReady+", Nordic="+nordicNotifyReady+", MTU="+mtuSize);
             runOnUiThread(()->{
-                probeButton.setEnabled(notifyReady && g3Write!=null);
-                setProtocolStatus(notifyReady
-                    ? "Gen3 service ready. Tap PROBE (no pairing or settings changes)."
-                    : "Notification channel could not be enabled");
+                probeButton.setEnabled((g3Write!=null && g3NotifyReady) ||
+                                       (nordicWrite!=null && nordicNotifyReady));
+                setProtocolStatus((g3NotifyReady||nordicNotifyReady)
+                    ? "Notification channels ready. Tap PROBE (never changes pairing)."
+                    : "Notification setup failed — cannot test encrypted protocol.");
             });
             return;
         }
         try {
             if(!client.setCharacteristicNotification(d.getCharacteristic(),true)) {
-                record("Notifications could not be enabled locally");subscribeNext(client);return;
+                record("Could not enable local notifications");subscribeNext(client);return;
             }
             boolean started;
             if(Build.VERSION.SDK_INT>=33)
@@ -534,23 +563,65 @@ public final class MainActivity extends Activity {
                 d.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
                 started=client.writeDescriptor(d);
             }
-            if(!started) {record("CCCD write could not start");subscribeNext(client);}
-        } catch(SecurityException e) {record("CCCD blocked by Bluetooth permission");subscribing=false;}
+            if(!started) {record("CCCD write failed to start");subscribeNext(client);}
+        }catch(SecurityException e) {subscribing=false;record("Bluetooth permission denied subscribing");}
     }
     private void probeG3() {
-        if(gatt==null || g3Write==null || !notifyReady){setProtocolStatus("Connect to a G3 first");return;}
+        if(gatt==null || !notifyReady) {
+            setProtocolStatus("No scooter BLE connection yet");return;
+        }
         if(selectedName==null||selectedName.isEmpty()) {
-            setProtocolStatus("No advertised scooter name, so encryption key cannot be derived");
+            setProtocolStatus("Scooter advertised no name: cannot derive encryption key");return;
+        }
+        if(waitingCommand>=0 || probeActive)return;
+        probeActive=true;probeAttempt=-1;
+        g3Rx=0;nordicRx=0;
+        authButton.setEnabled(false);readButton.setEnabled(false);
+        setProtocolStatus("Trying read-only PRE_COMM on available Bluetooth channels…");
+        nextProbeAttempt();
+    }
+    private void nextProbeAttempt() {
+        if(!probeActive || gatt==null)return;
+        handler.removeCallbacks(operationTimeout);
+        waitingCommand=-1;
+        probeAttempt++;
+        if(probeAttempt>=4) {
+            probeActive=false;
+            setProtocolStatus("No PRE_COMM reply after 4 transport attempts. Share LOG; no pairing was modified.");
+            record("All four PRE_COMM probes timed out. Name length="+
+                (selectedName==null?0:selectedName.length())+
+                "; G3 notifications="+g3Rx+" Nordic notifications="+nordicRx+"; MTU="+mtuSize);
             return;
         }
-        if(waitingCommand>=0){record("Wait for current protocol request");return;}
+        boolean gen2=probeAttempt>=2;
+        boolean withResponse=(probeAttempt%2)==1;
+        if(gen2 && (nordicWrite==null||!nordicNotifyReady)) {
+            record("Skipping Nordic protocol probe: missing characteristic/subscription");
+            probeAttempt=3;nextProbeAttempt();return;
+        }
+        if(!gen2 && (g3Write==null||!g3NotifyReady)) {
+            record("Skipping proprietary G3 probe: missing characteristic/subscription");
+            probeAttempt=1;nextProbeAttempt();return;
+        }
+        protocol.setGeneration(gen2);
+        activeWrite=gen2?nordicWrite:g3Write;
+        activeNotification=gen2?NORDIC_NOTIFY:G3_NOTIFY;
+        activeWriteType=withResponse
+            ?BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            :BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE;
+        recvBuffer.reset();
         try {
-            byte[] frame=protocol.beginProbe(selectedName);
-            recvBuffer.reset();
-            authButton.setEnabled(false);readButton.setEnabled(false);
-            setProtocolStatus("PRE_COMM requested. Waiting for the scooter response…");
-            send(frame,NinebotProbe.PRE_COMM,0);
-        }catch(Exception e){setProtocolStatus("Probe unavailable: "+e.getMessage());}
+            byte[] encrypted=protocol.beginProbe(selectedName);
+            String channel=gen2?"Gen2 Nordic":"Gen3 Ninebot";
+            record("PRE_COMM attempt "+(probeAttempt+1)+"/4: "+channel+", write "+
+                (withResponse?"with response":"without response"));
+            setProtocolStatus("Probe "+(probeAttempt+1)+"/4: "+channel+
+                    ", "+(withResponse?"acknowledged write":"unacknowledged write"));
+            send(encrypted,NinebotProbe.PRE_COMM,0);
+        }catch(Exception e) {
+            record("Probe setup error: "+e.getClass().getSimpleName());
+            nextProbeAttempt();
+        }
     }
     private void authenticateG3() {
         if(gatt==null||!protocol.hasChallenge()) {
@@ -583,64 +654,85 @@ public final class MainActivity extends Activity {
         }catch(Exception e){setProtocolStatus("Read could not start: "+e.getMessage());}
     }
     private void send(byte[] payload,int expected,int index) {
-        if(gatt==null||g3Write==null||!notifyReady){
-            setProtocolStatus("G3 connection is not ready");return;
+        if(gatt==null||activeWrite==null||!notifyReady) {
+            setProtocolStatus("G3 communication channel not ready");return;
         }
         try {
-            if(payload.length>244) {setProtocolStatus("Packet too large");return;}
+            if(payload.length>mtuSize-3) {
+                waitingCommand=-1;
+                setProtocolStatus("MTU "+mtuSize+" cannot carry "+payload.length+
+                        "-byte packet in one write. No fragmented packets will be sent.");
+                record("Packet blocked by MTU: "+payload.length+" bytes vs "+(mtuSize-3)+" max");
+                probeActive=false;
+                return;
+            }
             waitingCommand=expected;waitingIndex=index;
             handler.removeCallbacks(operationTimeout);
-            boolean writeStarted;
+            boolean started;
             if(Build.VERSION.SDK_INT>=33) {
-                writeStarted = gatt.writeCharacteristic(g3Write,payload,
-                    BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)==BluetoothStatusCodes.SUCCESS;
-            } else {
-                g3Write.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
-                g3Write.setValue(payload);
-                writeStarted=gatt.writeCharacteristic(g3Write);
+                started = gatt.writeCharacteristic(activeWrite,payload,activeWriteType)==BluetoothStatusCodes.SUCCESS;
+            }else{
+                activeWrite.setWriteType(activeWriteType);
+                activeWrite.setValue(payload);
+                started=gatt.writeCharacteristic(activeWrite);
             }
-            if(!writeStarted) {
-                waitingCommand=-1;setProtocolStatus("Bluetooth rejected outgoing command");
-                record("Write did not start");return;
+            if(!started) {
+                waitingCommand=-1;
+                record("ATT write could not be initiated");
+                if(probeActive)handler.post(this::nextProbeAttempt);
+                else setProtocolStatus("BLE write could not start");
+                return;
             }
-            record("Sent read-only protocol command; expected=0x"+Integer.toHexString(expected)
-                +"; bytes="+payload.length);
-            handler.postDelayed(operationTimeout,6000);
+            record("Protocol command 0x"+Integer.toHexString(expected)+
+                " queued, "+payload.length+" bytes, "+(activeWriteType==BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT?"ack":"no-ack"));
+            handler.postDelayed(operationTimeout,expected==NinebotProbe.PRE_COMM?3200:6000);
         }catch(Exception e) {
             waitingCommand=-1;
-            record("Protocol transport error: "+e.getClass().getSimpleName());
-            setProtocolStatus("BLE write error: "+e.getClass().getSimpleName());
+            record("Bluetooth write error: "+e.getClass().getSimpleName());
+            if(probeActive)handler.post(this::nextProbeAttempt);
+            else setProtocolStatus("Bluetooth write error: "+e.getClass().getSimpleName());
         }
     }
     private synchronized void receive(byte[] data,UUID uuid) {
-        if(data==null||!uuid.equals(G3_NOTIFY))return;
+        if(data==null)return;
+        if(uuid.equals(G3_NOTIFY))g3Rx++;
+        else if(uuid.equals(NORDIC_NOTIFY))nordicRx++;
+        else return;
+        if(waitingCommand<0||!uuid.equals(activeNotification)) {
+            if(g3Rx+nordicRx<=6)record("Notification on "+(uuid.equals(G3_NOTIFY)?"Gen3":"Nordic")+
+                                   " ignored outside active probe ("+data.length+" bytes)");
+            return;
+        }
         if(recvBuffer.size()+data.length>8192)recvBuffer.reset();
         recvBuffer.write(data,0,data.length);
         byte[] bytes=recvBuffer.toByteArray();
         int offset=0;
         while(offset<bytes.length) {
             int start=-1;
-            for(int i=offset;i+1<bytes.length;i++)if((bytes[i]&255)==0x5A&&(bytes[i+1]&255)==0xB5){start=i;break;}
-            if(start<0) {
+            for(int i=offset;i+1<bytes.length;i++)
+                if((bytes[i]&255)==0x5A && bytes[i+1]==protocol.expectedSync2()){start=i;break;}
+            if(start<0){
                 recvBuffer.reset();
-                if(bytes.length>0 && (bytes[bytes.length-1]&255)==0x5A)recvBuffer.write(0x5A);
+                if(bytes.length>0&&(bytes[bytes.length-1]&255)==0x5A)recvBuffer.write(0x5A);
                 return;
             }
             if(bytes.length-start<3) {offset=start;break;}
             int size=(bytes[start+2]&255)+13;
-            if(size>275) {offset=start+1;continue;}
+            if(size>275){offset=start+1;continue;}
             if(bytes.length-start<size){offset=start;break;}
             byte[] frame=Arrays.copyOfRange(bytes,start,start+size);
             offset=start+size;
             try {
                 NinebotProbe.Packet packet=protocol.decrypt(frame);
                 if(packet.error!=0){
-                    record("Encrypted reply could not be verified (status "+packet.error+")");
+                    record("Reply could not be decrypted; status="+packet.error);
                     continue;
                 }
                 NinebotProbe.Reply reply=protocol.parse(packet.plaintext);
                 handleReply(reply);
-            }catch(Exception e){record("Protocol reply parsing error: "+e.getClass().getSimpleName());}
+            }catch(Exception e) {
+                record("Reply rejected: "+e.getClass().getSimpleName());
+            }
         }
         recvBuffer.reset();
         if(offset<bytes.length)recvBuffer.write(bytes,offset,bytes.length-offset);
@@ -656,6 +748,7 @@ public final class MainActivity extends Activity {
         handler.removeCallbacks(operationTimeout);
         waitingCommand=-1;
         if(r.command==NinebotProbe.PRE_COMM) {
+            probeActive=false;
             String result=protocol.onPreComm(r);
             record(result);
             runOnUiThread(()->{
