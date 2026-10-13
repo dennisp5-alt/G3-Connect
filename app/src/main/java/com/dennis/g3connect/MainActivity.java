@@ -73,8 +73,8 @@ public final class MainActivity extends Activity {
     private int waitingCommand=-1;
     private int waitingIndex=-1;
     private int readStep;
-    private final int[] readIndexes = {0x55, 0x62, 0x5F};
-    private final int[] readLengths = {2, 4, 2};
+    private final int[] readIndexes = {0x55,0x62,0x5F,0x6B,0x5A,0x70,0x42,0x49,0x76,0x4A};
+    private final int[] readLengths = {2,4,2,2,2,2,2,2,2,2};
     private final Runnable operationTimeout = () -> {
         if(waitingCommand<0)return;
         int failed=waitingCommand;
@@ -86,7 +86,15 @@ public final class MainActivity extends Activity {
         }else if(failed==NinebotProbe.AUTH) {
             setProtocolStatus("AUTH unanswered: existing key may be wrong or firmware needs reassertion; no pairing attempted.");
         }else {
-            setProtocolStatus("Read timed out; G3 may have disconnected.");
+            if(failed==NinebotProbe.READ_RESP && protocol.isAuthenticated()) {
+                int index=waitingIndex;
+                record("Register 0x"+Integer.toHexString(index)+" unanswered; skipping");
+                if(index==0x55 || index==0x62 || index==0x5F || index==0x6B || index==0x5A)
+                    runOnUiThread(()->rideData.append("\nRegister 0x"+Integer.toHexString(index)+": unavailable"));
+                else runOnUiThread(()->settingsData.append("\nRegister 0x"+Integer.toHexString(index)+": unavailable"));
+                readStep++;
+                handler.postDelayed(this::readNext,200);
+            }else setProtocolStatus("Read timed out; G3 may have disconnected.");
         }
     };
     private final Set<String> addresses = new HashSet<>();
@@ -99,7 +107,7 @@ public final class MainActivity extends Activity {
     private int scanCallbacks;
     private final Runnable scanTimeout = this::stopScan;
     private int packetCount;
-    private TextView status, details, log, protocolStatus, rideData;
+    private TextView status, details, log, protocolStatus, rideData, settingsData;
     private EditText pairingKey;
     private Button probeButton, authButton, readButton;
     private LinearLayout deviceList;
@@ -114,7 +122,7 @@ public final class MainActivity extends Activity {
         BluetoothManager manager = (BluetoothManager) getSystemService(BLUETOOTH_SERVICE);
         adapter = manager == null ? null : manager.getAdapter();
         buildUi();
-        record("G3 Connect v0.2.2 — diagnostic mode");
+        record("G3 Connect v0.3.0 — diagnostic mode");
         if (adapter == null) setStatus("Bluetooth unavailable");
         systemCheck();
     }
@@ -211,12 +219,14 @@ public final class MainActivity extends Activity {
         rideData.setPadding(dp(12),dp(12),dp(12),dp(12));rideData.setBackgroundColor(panel);
         root.addView(rideData);
 
-        TextView settings = text("SETTINGS — DISABLED UNTIL VERIFIED",13,muted,true);
+        TextView settings = text("SCOOTER SETTINGS — READ ONLY",13,muted,true);
         LinearLayout.LayoutParams settingsP = new LinearLayout.LayoutParams(-1,-2);
         settingsP.topMargin=dp(22); root.addView(settings,settingsP);
-        TextView preview = text("○ Energy recovery\n○ Kick-start speed\n○ Charge limit\n○ Auto power-off\n○ Sound volume\n\nThe scooter's encrypted login must work before we activate these controls.",14,muted,false);
-        preview.setPadding(dp(12),dp(12),dp(12),dp(12)); preview.setBackgroundColor(panel);
-        root.addView(preview);
+        settingsData = text("Authenticate, then tap READ DATA to inspect current settings.\n\nEnergy recovery • Start speed • Auto power-off\nSound volume • Custom button\n\nCharge limit requires a separate BMS board scan.\n\nNo changes will be sent to the scooter.",14,muted,false);
+        settingsData.setPadding(dp(12),dp(12),dp(12),dp(12));
+        settingsData.setBackgroundColor(panel);
+        settingsData.setTextIsSelectable(true);
+        root.addView(settingsData);
 
         TextView logTitle = text("LOCAL DIAGNOSTIC LOG",13,muted,true);
         LinearLayout.LayoutParams logP = new LinearLayout.LayoutParams(-1,-2);
@@ -640,18 +650,24 @@ public final class MainActivity extends Activity {
     private void readG3() {
         if(!protocol.isAuthenticated()){setProtocolStatus("Authenticate first");return;}
         if(waitingCommand>=0)return;
-        readStep=0;rideData.setText("Reading live scooter data…");
+        readStep=0;
+        rideData.setText("Reading scooter telemetry…");
+        settingsData.setText("Reading current settings (no writes)…");
+        setProtocolStatus("Authenticated — reading current scooter data and settings");
         readNext();
     }
     private void readNext() {
         if(readStep>=readIndexes.length) {
-            setProtocolStatus("Read-only telemetry complete (no configuration changes).");
+            setProtocolStatus("Authenticated — readings complete. No settings changed.");
             return;
         }
         try {
             int idx=readIndexes[readStep];
             send(protocol.readRegister(idx,readLengths[readStep]),NinebotProbe.READ_RESP,idx);
-        }catch(Exception e){setProtocolStatus("Read could not start: "+e.getMessage());}
+        }catch(Exception e) {
+            record("Read error register 0x"+Integer.toHexString(readIndexes[readStep]));
+            setProtocolStatus("Read error, see diagnostic log");
+        }
     }
     private void send(byte[] payload,int expected,int index) {
         if(gatt==null||activeWrite==null||!notifyReady) {
@@ -762,23 +778,50 @@ public final class MainActivity extends Activity {
         } else if(r.command==NinebotProbe.AUTH) {
             protocol.onAuth(r);
             record("AUTH confirmed by scooter");
-            setProtocolStatus("Authenticated successfully — tap READ DATA.");
-            runOnUiThread(()->readButton.setEnabled(true));
+            setProtocolStatus("Scooter authenticated successfully — tap READ DATA for telemetry and settings.");
+            runOnUiThread(()->{
+                readButton.setEnabled(true);
+                status.setText("Scooter authenticated ✓");
+                details.setText(details.getText().toString()
+                    .replace("BLE GATT connected (not scooter login)", "BLE + scooter authenticated")
+                    .replace("Scooter authentication: NOT STARTED", "Scooter authentication: VERIFIED"));
+            });
         } else if(r.command==NinebotProbe.READ_RESP) {
-            long value=NinebotProbe.unsignedLE(r.payload);
             int step=readStep;
+            int index=readIndexes[step];
+            int expectedLength=readLengths[step];
+            if(r.payload.length<expectedLength)
+                throw new GeneralSecurityException("Short register response 0x"+Integer.toHexString(index));
+            long v=NinebotProbe.unsignedLE(r.payload);
             String line;
-            if(step==0)line="Battery: "+value+"%";
-            else if(step==1)line="Total mileage: "+String.format(Locale.US,"%.1f",value/10.0)+" km";
-            else line="Remaining range: "+String.format(Locale.US,"%.2f",value/100.0)+" km";
+            switch(index) {
+                case 0x55: line="Battery: "+(v<=100?v+"%":"unverified raw "+v);break;
+                case 0x62: line="Total mileage: "+String.format(Locale.US,"%.1f",v/10.0)+" km";break;
+                case 0x5F: line="Estimated remaining range: "+String.format(Locale.US,"%.2f",v/100.0)+" km";break;
+                case 0x6B: line="Controller temperature: "+String.format(Locale.US,"%.1f",v/10.0)+" °C";break;
+                case 0x5A:
+                    line="Ride mode: "+(v==1?"Walk":v==2?"Eco":v==3?"Sport":v==5?"Drive":"unverified raw "+v);break;
+                case 0x70:
+                    line="Energy recovery: "+(v==0?"Off":v==1?"Low":v==2?"Standard":"unverified raw "+v);break;
+                case 0x42:
+                    line="Start speed: "+((v>=3 && v<=5)?v+" km/h":"unverified raw "+v);break;
+                case 0x49:
+                    line="Auto power-off: "+((v>=1 && v<=30)?v+" min":"unverified raw "+v);break;
+                case 0x76:
+                    line="Sound volume: "+((v>=5 && v<=100)?v+"%":"unverified raw "+v);break;
+                case 0x4A:
+                    line="Custom button: "+(v==6?"Hazard lights":v==4?"Energy recovery level":v==7?"Boost":"unverified raw "+v);break;
+                default:line="Register 0x"+Integer.toHexString(index)+": "+v;
+            }
             record("Read response "+line);
             runOnUiThread(()->{
-                String old=rideData.getText().toString();
-                if(step==0||old.startsWith("Reading"))rideData.setText(line);
-                else rideData.append("\n"+line);
+                TextView target=(step<=4)?rideData:settingsData;
+                String old=target.getText().toString();
+                if(step==0||step==5||old.startsWith("Reading"))target.setText(line);
+                else target.append("\n"+line);
+                readStep++;
+                handler.postDelayed(this::readNext,180);
             });
-            readStep++;
-            handler.postDelayed(this::readNext,180);
         }
     }
     private void shareLog() {

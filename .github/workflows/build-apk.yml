@@ -35,18 +35,18 @@ jobs:
         run: gradle --no-daemon :app:assembleDebug
       - uses: actions/upload-artifact@v4
         with:
-          name: G3-Connect-v0.2.2-Diagnostic-APK
+          name: G3-Connect-v0.3.0-Diagnostic-APK
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
       - name: Publish direct APK download
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk G3Connect-v0.2.2.apk
-          if gh release view v0.2.2 >/dev/null 2>&1; then
-            gh release upload v0.2.2 G3Connect-v0.2.2.apk --clobber
+          cp app/build/outputs/apk/debug/app-debug.apk G3Connect-v0.3.0.apk
+          if gh release view v0.3.0 >/dev/null 2>&1; then
+            gh release upload v0.3.0 G3Connect-v0.3.0.apk --clobber
           else
-            gh release create v0.2.2 G3Connect-v0.2.2.apk --target "$GITHUB_SHA" \
-              --title "G3 Connect v0.2.2 - Read-only G3 protocol test" \
+            gh release create v0.3.0 G3Connect-v0.3.0.apk --target "$GITHUB_SHA" \
+              --title "G3 Connect v0.3.0 - Verified authentication and read-only settings dashboard" \
               --notes "Read-only G3 protocol probe, optional existing-key AUTH, battery/mileage/range reads. No pairing or settings writes."
           fi

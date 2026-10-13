@@ -85,8 +85,14 @@ final class NinebotProbe {
     }
     byte[] readRegister(int register, int length) throws GeneralSecurityException {
         if(!authenticated) throw new GeneralSecurityException("Not authenticated");
-        if((register!=0x55 && register!=0x62 && register!=0x5F) || (length!=2 && length!=4))
-            throw new GeneralSecurityException("Register not on read-only allowlist");
+        // Explicit MAX G3 VCU read-only allowlist. No write operations are available.
+        if(register==0x62) {
+            if(length!=4)throw new GeneralSecurityException("Odometer requires 4 bytes");
+        }else if(register==0x55 || register==0x5F || register==0x6B ||
+                 register==0x5A || register==0x70 || register==0x42 ||
+                 register==0x49 || register==0x76 || register==0x4A) {
+            if(length!=2)throw new GeneralSecurityException("Register requires 2 bytes");
+        }else throw new GeneralSecurityException("Register not on read-only allowlist");
         return crypto.encrypt(frame(BOARD_VCU,READ,register,new byte[]{(byte)length}));
     }
     Packet decrypt(byte[] data) throws GeneralSecurityException {return crypto.decrypt(data);}
