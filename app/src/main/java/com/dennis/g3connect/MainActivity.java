@@ -22,6 +22,8 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.location.LocationManager;
+import android.provider.Settings;
 import android.view.Gravity;
 import android.widget.Button;
 import android.widget.LinearLayout;
@@ -32,6 +34,7 @@ import java.text.DateFormat;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.Locale;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
@@ -51,6 +54,9 @@ public final class MainActivity extends Activity {
     private BluetoothLeScanner scanner;
     private BluetoothGatt gatt;
     private boolean scanning;
+    private boolean scanFailed;
+    private int scanCallbacks;
+    private final Runnable scanTimeout = this::stopScan;
     private int packetCount;
     private TextView status, details, log;
     private LinearLayout deviceList;
@@ -65,8 +71,9 @@ public final class MainActivity extends Activity {
         BluetoothManager manager = (BluetoothManager) getSystemService(BLUETOOTH_SERVICE);
         adapter = manager == null ? null : manager.getAdapter();
         buildUi();
-        record("G3 Connect v0.1.1 — diagnostic mode");
+        record("G3 Connect v0.1.2 — diagnostic mode");
         if (adapter == null) setStatus("Bluetooth unavailable");
+        systemCheck();
     }
 
     private TextView text(String value, int size, int color, boolean bold) {
@@ -111,6 +118,12 @@ public final class MainActivity extends Activity {
         disconnectButton = addButton(actions,"DISCONNECT",this::disconnect);
         disconnectButton.setEnabled(false);
         addButton(actions,"SHARE LOG",this::shareLog);
+        LinearLayout tools = new LinearLayout(this);
+        LinearLayout.LayoutParams toolsP = new LinearLayout.LayoutParams(-1,-2);
+        toolsP.topMargin = dp(6); root.addView(tools,toolsP);
+        addButton(tools,"SYSTEM CHECK",this::systemCheck);
+        addButton(tools,"PAIRED",this::showBondedDevices);
+        addButton(tools,"LOCATION",() -> startActivity(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)));
 
         TextView near = text("NEARBY DEVICES",13,muted,true);
         LinearLayout.LayoutParams nearP = new LinearLayout.LayoutParams(-1,-2);
@@ -151,9 +164,62 @@ public final class MainActivity extends Activity {
             if (log!=null) log.setText(shown);
         });
     }
+    private boolean locationEnabled() {
+        LocationManager lm = (LocationManager) getSystemService(LOCATION_SERVICE);
+        if (lm == null) return false;
+        if (Build.VERSION.SDK_INT >= 28) return lm.isLocationEnabled();
+        try {
+            return Settings.Secure.getInt(getContentResolver(), Settings.Secure.LOCATION_MODE)
+                    != Settings.Secure.LOCATION_MODE_OFF;
+        } catch (Settings.SettingNotFoundException e) { return false; }
+    }
+    private void systemCheck() {
+        boolean enabled = false;
+        try { enabled = adapter != null && adapter.isEnabled(); }
+        catch (SecurityException ignored) {}
+        boolean loc = locationEnabled();
+        record("System: " + Build.MANUFACTURER + " " + Build.MODEL
+                + ", Android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ")");
+        record("BLE supported=" + getPackageManager().hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE)
+                + ", Bluetooth on=" + enabled + ", Location on=" + loc);
+        record("Permission Nearby scan="
+                + (Build.VERSION.SDK_INT < 31 ? "pre-Android-12" : checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN)==PackageManager.PERMISSION_GRANTED)
+                + ", Nearby connect=" +
+                (Build.VERSION.SDK_INT < 31 ? "pre-Android-12" : checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)==PackageManager.PERMISSION_GRANTED)
+                + ", Precise location=" + (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)==PackageManager.PERMISSION_GRANTED));
+        if (!loc) {
+            setStatus("Location is OFF — turn it ON for BLE scanning");
+            record("Location OFF: open LOCATION button and enable global Location switch");
+        }
+    }
+    private void showBondedDevices() {
+        if(adapter == null) {record("Bluetooth unavailable");return;}
+        if (Build.VERSION.SDK_INT >= 31 &&
+            checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(permissions(), REQUEST_BLE); return;
+        }
+        try {
+            Set<BluetoothDevice> bonded = adapter.getBondedDevices();
+            record("Paired system Bluetooth devices: " + bonded.size() +
+                   " (paired is not the same as G3 authorization)");
+            deviceList.removeAllViews();
+            addresses.clear();
+            for(BluetoothDevice device : bonded) {
+                final String address = device.getAddress();
+                final String name = device.getName()==null?"Unnamed paired device":device.getName();
+                Button b = new Button(this);
+                b.setAllCaps(false); b.setTextSize(12);
+                b.setText(name + " [PAIRED]\\n" + address);
+                b.setOnClickListener(v -> connect(device,name,address));
+                deviceList.addView(b);
+            }
+            if(bonded.isEmpty()) deviceList.addView(text("No system-paired devices. This is normal for many BLE scooters.", 13, Color.LTGRAY, false));
+        } catch (SecurityException e) {record("Could not read paired devices: permission denied");}
+    }
     private String[] permissions() {
         return Build.VERSION.SDK_INT >= 31
-            ? new String[]{Manifest.permission.BLUETOOTH_SCAN,Manifest.permission.BLUETOOTH_CONNECT}
+            ? new String[]{Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT,
+                    Manifest.permission.ACCESS_FINE_LOCATION}
             : new String[]{Manifest.permission.ACCESS_FINE_LOCATION};
     }
     private boolean granted() {
@@ -163,6 +229,12 @@ public final class MainActivity extends Activity {
     private void startScan() {
         if (adapter == null) {setStatus("Bluetooth unavailable"); return;}
         if (!granted()) {requestPermissions(permissions(),REQUEST_BLE);return;}
+        systemCheck();
+        if (!locationEnabled()) {
+            record("Scan not started: Location services OFF; use LOCATION button");
+            setStatus("Enable Location, then try SCAN");
+            return;
+        }
         try {
             if (!adapter.isEnabled()) {
                 startActivity(new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE));
@@ -172,17 +244,26 @@ public final class MainActivity extends Activity {
             scanner = adapter.getBluetoothLeScanner();
             if (scanner == null) {setStatus("BLE scanner unavailable"); return;}
             deviceList.removeAllViews(); addresses.clear(); packetCount=0;
-            setStatus("Scanning nearby Bluetooth devices…");
+            scanCallbacks=0;scanFailed=false;
+            setStatus("Scanning BLE advertisements (25 seconds)…");
             scanning=true; scanButton.setEnabled(false);
-            scanner.startScan(null, new ScanSettings.Builder()
-                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(),scanCallback);
-            record("Scan started (12 seconds)");
-            handler.postDelayed(this::stopScan,12000);
-        } catch (SecurityException e) {scanning=false;scanButton.setEnabled(true);record("Bluetooth permission denied");}
-          catch (RuntimeException e) {scanning=false;scanButton.setEnabled(true);record("Scan error: "+e.getClass().getSimpleName());}
+            ScanSettings settings = new ScanSettings.Builder()
+                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
+                .setReportDelay(0)
+                .setLegacy(false)
+                .build();
+            scanner.startScan(null, settings,scanCallback);
+            record("Scan started (25 seconds, unfiltered, legacy+extended BLE; keep screen ON)");
+            handler.removeCallbacks(scanTimeout);
+            handler.postDelayed(scanTimeout,25000);
+        } catch (SecurityException e) {scanning=false;scanButton.setEnabled(true);setStatus("Bluetooth permission denied");record("Bluetooth permission denied");}
+          catch (RuntimeException e) {scanning=false;scanButton.setEnabled(true);setStatus("Scan error");record("Scan error: "+e.getClass().getSimpleName()+": "+e.getMessage());}
     }
     private final ScanCallback scanCallback = new ScanCallback() {
         @Override public void onScanResult(int callbackType, ScanResult result) {
+            if(!scanning) return;
+            scanCallbacks++;
             BluetoothDevice device=result.getDevice(); if(device==null) return;
             final String address;
             try {address=device.getAddress();} catch(SecurityException e){return;}
@@ -200,8 +281,13 @@ public final class MainActivity extends Activity {
                 deviceList.addView(b);
             });
         }
+        @Override public void onBatchScanResults(List<ScanResult> results) {
+            record("Received BLE batch of " + results.size() + " packets");
+            for (ScanResult result:results) onScanResult(ScanSettings.CALLBACK_TYPE_ALL_MATCHES,result);
+        }
         @Override public void onScanFailed(int code) {
-            record("BLE scan failed: "+code);
+            scanFailed=true;
+            record("BLE scan failed: "+code+" (1=already scanning, 2=registration, 3=internal, 4=unsupported)");
             setStatus("Scan failed ("+code+")");
             runOnUiThread(MainActivity.this::stopScan);
         }
@@ -209,11 +295,17 @@ public final class MainActivity extends Activity {
     private void stopScan() {
         if(!scanning) return;
         scanning=false;
+        handler.removeCallbacks(scanTimeout);
         try {if(scanner!=null && granted()) scanner.stopScan(scanCallback);}
         catch(RuntimeException e){record("Scan stop: "+e.getClass().getSimpleName());}
         scanButton.setEnabled(true);
-        record("Scan finished; found "+addresses.size()+" device(s)");
-        if(gatt==null) setStatus("Select a device from the list");
+        record("Scan finished: "+scanCallbacks+" advertisement callback(s), "+addresses.size()+" unique device(s)");
+        if (gatt==null && !scanFailed) {
+            if (addresses.isEmpty()) {
+                setStatus("No BLE devices found — check Location and scooter advertising");
+                record("Zero results: if Location and permissions are ON, check G3 power/Segway connection; test with another BLE scanner");
+            } else setStatus("Found "+addresses.size()+" devices — select scooter");
+        }
     }
     private void connect(BluetoothDevice device,String name,String address) {
         stopScan(); disconnect();
@@ -340,7 +432,7 @@ public final class MainActivity extends Activity {
         super.onRequestPermissionsResult(request,p,outcomes);
         if(request==REQUEST_BLE) {
             if(granted()) startScan();
-            else {record("Nearby devices permission declined");setStatus("Bluetooth permission required");}
+            else {record("BLE permissions declined; grant Nearby devices and Precise location in Android App info");setStatus("Bluetooth + Location permissions required");}
         }
     }
     @Override protected void onDestroy() {
