@@ -9,7 +9,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -33,3 +33,15 @@ jobs:
           name: G3-Connect-v0.1.1-Diagnostic-APK
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+      - name: Publish direct APK download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk G3Connect-v0.1.1.apk
+          if gh release view v0.1.1 >/dev/null 2>&1; then
+            gh release upload v0.1.1 G3Connect-v0.1.1.apk --clobber
+          else
+            gh release create v0.1.1 G3Connect-v0.1.1.apk --target "$GITHUB_SHA" \
+              --title "G3 Connect v0.1.1 - Bluetooth diagnostic" \
+              --notes "Read-only BLE diagnostics. Scooter authentication and settings are not implemented."
+          fi
