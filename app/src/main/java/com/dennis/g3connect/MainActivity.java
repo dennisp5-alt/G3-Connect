@@ -2,6 +2,7 @@ package com.dennis.g3connect;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
@@ -68,6 +69,10 @@ public final class MainActivity extends Activity {
     private boolean notifyReady, g3NotifyReady, nordicNotifyReady;
     private boolean probeActive;
     private int probeAttempt=-1, mtuSize=23, g3Rx, nordicRx;
+    private final int[] probeOrder={2,3,0,1}; // confirmed scooter: Nordic Gen2 no-ACK first
+    private int currentVolume=-1,currentAutoOff=-1;
+    private boolean settingWritePending, verifyingSetting;
+    private int requestedSettingIndex=-1, requestedSettingValue=-1;
     private boolean subscribing;
     private String selectedName;
     private int waitingCommand=-1;
@@ -87,6 +92,13 @@ public final class MainActivity extends Activity {
         }else if(failed==NinebotProbe.AUTH) {
             setProtocolStatus("AUTH unanswered: existing key may be wrong or firmware needs reassertion; no pairing attempted.");
         }else {
+            if(failed==NinebotProbe.READ_RESP && verifyingSetting) {
+                record("Setting write could not be verified: register 0x"+Integer.toHexString(requestedSettingIndex));
+                settingWritePending=false;verifyingSetting=false;
+                setProtocolStatus("Setting change UNVERIFIED: no readback. Do not repeat; share diagnostic log.");
+                runOnUiThread(()->{volumeButton.setEnabled(false);autoOffButton.setEnabled(false);readButton.setEnabled(true);});
+                return;
+            }
             if(failed==NinebotProbe.READ_RESP && protocol.isAuthenticated()) {
                 int index=waitingIndex;
                 record("Register 0x"+Integer.toHexString(index)+" unanswered; skipping");
@@ -110,7 +122,7 @@ public final class MainActivity extends Activity {
     private int packetCount;
     private TextView status, details, log, protocolStatus;
     private EditText pairingKey;
-    private Button probeButton, authButton, readButton;
+    private Button probeButton, authButton, readButton, volumeButton, autoOffButton;
     private LinearLayout deviceList;
     private Button scanButton, disconnectButton;
 
@@ -123,7 +135,7 @@ public final class MainActivity extends Activity {
         BluetoothManager manager = (BluetoothManager) getSystemService(BLUETOOTH_SERVICE);
         adapter = manager == null ? null : manager.getAdapter();
         buildUi();
-        record("G3 Connect v0.3.0 — diagnostic mode");
+        record("G3 Connect v0.4.0 — diagnostic mode");
         if (adapter == null) setStatus("Bluetooth unavailable");
         systemCheck();
     }
@@ -228,6 +240,16 @@ public final class MainActivity extends Activity {
         settingsData.setBackgroundColor(panel);
         settingsData.setTextIsSelectable(true);
         root.addView(settingsData);
+
+        TextView caution=text("OPTIONAL CHANGES — PARK SCOOTER FIRST\nSound volume and auto power-off only. Every change requires confirmation and a verified readback. No motor, speed, braking, region, or pairing changes.",12,muted,false);
+        caution.setPadding(dp(8),dp(12),dp(8),dp(6));
+        root.addView(caution);
+        LinearLayout controlRow=new LinearLayout(this);
+        controlRow.setOrientation(LinearLayout.HORIZONTAL);
+        root.addView(controlRow);
+        volumeButton=addButton(controlRow,"SOUND VOLUME",()->chooseSetting(0x76));
+        autoOffButton=addButton(controlRow,"AUTO POWER-OFF",()->chooseSetting(0x49));
+        volumeButton.setEnabled(false);autoOffButton.setEnabled(false);
 
         TextView logTitle = text("LOCAL DIAGNOSTIC LOG",13,muted,true);
         LinearLayout.LayoutParams logP = new LinearLayout.LayoutParams(-1,-2);
@@ -395,6 +417,8 @@ public final class MainActivity extends Activity {
         selectedName=name.equals("Unnamed BLE device")?null:name;
         g3Write=null;nordicWrite=null;activeWrite=null;
         probeActive=false;probeAttempt=-1;mtuSize=23;g3Rx=0;nordicRx=0;
+        settingWritePending=false;verifyingSetting=false;
+        currentVolume=-1;currentAutoOff=-1;
         notifyReady=false;g3NotifyReady=false;nordicNotifyReady=false;
         recvBuffer.reset();subscriptions.clear();subscribing=false;
         probeButton.setEnabled(false);authButton.setEnabled(false);readButton.setEnabled(false);
@@ -414,6 +438,8 @@ public final class MainActivity extends Activity {
         handler.removeCallbacks(operationTimeout);
         waitingCommand=-1;
         probeActive=false;
+        settingWritePending=false;verifyingSetting=false;
+        currentVolume=-1;currentAutoOff=-1;
         BluetoothGatt previous=gatt; gatt=null;
         if(previous!=null) {
             try {previous.disconnect();previous.close();} catch(RuntimeException ignored){}
@@ -424,6 +450,8 @@ public final class MainActivity extends Activity {
         if(probeButton!=null)probeButton.setEnabled(false);
         if(authButton!=null)authButton.setEnabled(false);
         if(readButton!=null)readButton.setEnabled(false);
+        if(volumeButton!=null)volumeButton.setEnabled(false);
+        if(autoOffButton!=null)autoOffButton.setEnabled(false);
         setStatus("Disconnected");
     }
     private final BluetoothGattCallback callbacks = new BluetoothGattCallback() {
@@ -439,8 +467,10 @@ public final class MainActivity extends Activity {
                 protocol.reset();notifyReady=false;g3Write=null;nordicWrite=null;
                 probeActive=false;activeWrite=null;subscribing=false;
                 handler.removeCallbacks(operationTimeout);waitingCommand=-1;
+                settingWritePending=false;verifyingSetting=false;
                 runOnUiThread(() -> {
                     probeButton.setEnabled(false);authButton.setEnabled(false);readButton.setEnabled(false);
+                    volumeButton.setEnabled(false);autoOffButton.setEnabled(false);
                     setProtocolStatus("Disconnected");
                 });
                 client.close(); return;
@@ -508,6 +538,13 @@ public final class MainActivity extends Activity {
                 BluetoothGattCharacteristic characteristic,int statusCode) {
             if(client!=gatt)return;
             if(statusCode!=BluetoothGatt.GATT_SUCCESS) {
+                if(settingWritePending) {
+                    settingWritePending=false;verifyingSetting=false;
+                    record("Settings transport write failed (GATT status="+statusCode+")");
+                    setProtocolStatus("Setting write rejected; no change verified. Share log.");
+                    runOnUiThread(()->{volumeButton.setEnabled(false);autoOffButton.setEnabled(false);readButton.setEnabled(true);});
+                    return;
+                }
                 record("Protocol write rejected (GATT status="+statusCode+")");
                 int failed=waitingCommand;
                 handler.removeCallbacks(operationTimeout);waitingCommand=-1;
@@ -604,15 +641,16 @@ public final class MainActivity extends Activity {
                 "; G3 notifications="+g3Rx+" Nordic notifications="+nordicRx+"; MTU="+mtuSize);
             return;
         }
-        boolean gen2=probeAttempt>=2;
-        boolean withResponse=(probeAttempt%2)==1;
+        int option=probeOrder[probeAttempt];
+        boolean gen2=option>=2;
+        boolean withResponse=(option%2)==1;
         if(gen2 && (nordicWrite==null||!nordicNotifyReady)) {
             record("Skipping Nordic protocol probe: missing characteristic/subscription");
-            probeAttempt=3;nextProbeAttempt();return;
+            nextProbeAttempt();return;
         }
         if(!gen2 && (g3Write==null||!g3NotifyReady)) {
             record("Skipping proprietary G3 probe: missing characteristic/subscription");
-            probeAttempt=1;nextProbeAttempt();return;
+            nextProbeAttempt();return;
         }
         protocol.setGeneration(gen2);
         activeWrite=gen2?nordicWrite:g3Write;
@@ -648,9 +686,94 @@ public final class MainActivity extends Activity {
             send(frame,NinebotProbe.AUTH,0);
         }catch(Exception e){setProtocolStatus("Authentication not started: "+e.getMessage());}
     }
+    private void chooseSetting(int register) {
+        if(!protocol.isAuthenticated() || gatt==null || settingWritePending || waitingCommand>=0)
+            {setProtocolStatus("Authenticate and finish READ DATA before changing settings");return;}
+        final int current=register==0x76?currentVolume:currentAutoOff;
+        if(!NinebotProbe.allowedSettingWrite(register,current)) {
+            setProtocolStatus("Current setting was not verified. Tap READ DATA first.");return;
+        }
+        final int[] options=register==0x76
+            ?new int[]{20,40,60,80,100}
+            :new int[]{5,10,15,20,30};
+        final String[] labels=new String[options.length];
+        for(int i=0;i<options.length;i++)labels[i]=options[i]+(register==0x76?"%":" min");
+        final String name=register==0x76?"Sound volume":"Auto power-off";
+        new AlertDialog.Builder(this)
+            .setTitle(name+" — currently "+current+(register==0x76?"%":" min"))
+            .setItems(labels,(dialog,which)->{
+                final int desired=options[which];
+                if(desired==current) {
+                    setProtocolStatus("No change: "+name+" already "+labels[which]);return;
+                }
+                new AlertDialog.Builder(this)
+                    .setTitle("Confirm scooter setting")
+                    .setMessage("Scooter must be parked. Change "+name+" from "+
+                        current+(register==0x76?"%":" min")+" to "+
+                        desired+(register==0x76?"%":" min")+
+                        "?\\n\\nThe app will read the setting back. If verification fails, do not repeat until checking the scooter.")
+                    .setNegativeButton("Cancel",null)
+                    .setPositiveButton("APPLY",(d,w)->applySetting(register,desired))
+                    .show();
+            })
+            .setNegativeButton("Cancel",null)
+            .show();
+    }
+    private void applySetting(int register,int value) {
+        if(!protocol.isAuthenticated() || !NinebotProbe.allowedSettingWrite(register,value)
+            || waitingCommand>=0 || settingWritePending || activeWrite==null || gatt==null) {
+            setProtocolStatus("Cannot change setting: connection or operation not ready");return;
+        }
+        final int existing=register==0x76?currentVolume:currentAutoOff;
+        if(!NinebotProbe.allowedSettingWrite(register,existing)) {
+            setProtocolStatus("Cannot change unknown current value");return;
+        }
+        try {
+            byte[] request=protocol.writeSetting(register,value);
+            if(request.length>mtuSize-3) {setProtocolStatus("MTU too small for setting request");return;}
+            boolean started;
+            if(Build.VERSION.SDK_INT>=33)
+                started=gatt.writeCharacteristic(activeWrite,request,
+                    BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)==BluetoothStatusCodes.SUCCESS;
+            else {
+                activeWrite.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE);
+                activeWrite.setValue(request);
+                started=gatt.writeCharacteristic(activeWrite);
+            }
+            if(!started) {setProtocolStatus("Bluetooth did not accept setting write");return;}
+            settingWritePending=true;verifyingSetting=false;
+            requestedSettingIndex=register;requestedSettingValue=value;
+            volumeButton.setEnabled(false);autoOffButton.setEnabled(false);readButton.setEnabled(false);
+            record("One-shot setting command 0x03 sent for 0x"+Integer.toHexString(register)+
+                   ": requested "+value+", was "+existing);
+            setProtocolStatus("Setting requested. Waiting to verify actual scooter readback…");
+            handler.postDelayed(this::verifySetting,750);
+        }catch(Exception e) {
+            record("Setting request error: "+e.getClass().getSimpleName());
+            setProtocolStatus("Setting could not be sent");
+        }
+    }
+    private void verifySetting() {
+        if(!settingWritePending || gatt==null)return;
+        if(waitingCommand>=0){ // prevents competing BLE requests
+            settingWritePending=false;
+            setProtocolStatus("Setting change not verified due to busy connection; share log");
+            readButton.setEnabled(true);return;
+        }
+        try {
+            verifyingSetting=true;
+            send(protocol.readRegister(requestedSettingIndex,2),
+                 NinebotProbe.READ_RESP,requestedSettingIndex);
+        }catch(Exception e) {
+            settingWritePending=false;verifyingSetting=false;
+            record("Readback could not begin: "+e.getClass().getSimpleName());
+            setProtocolStatus("Setting was sent but readback could not start; share log");
+            readButton.setEnabled(true);
+        }
+    }
     private void readG3() {
         if(!protocol.isAuthenticated()){setProtocolStatus("Authenticate first");return;}
-        if(waitingCommand>=0)return;
+        if(waitingCommand>=0 || settingWritePending)return;
         readStep=0;
         rideData.setText("Reading scooter telemetry…");
         settingsData.setText("Reading current settings (no writes)…");
@@ -659,7 +782,9 @@ public final class MainActivity extends Activity {
     }
     private void readNext() {
         if(readStep>=readIndexes.length) {
-            setProtocolStatus("Authenticated — readings complete. No settings changed.");
+            setProtocolStatus("Authenticated — readings complete. Settings available where verified.");
+            volumeButton.setEnabled(NinebotProbe.allowedSettingWrite(0x76,currentVolume));
+            autoOffButton.setEnabled(NinebotProbe.allowedSettingWrite(0x49,currentAutoOff));
             return;
         }
         try {
@@ -788,6 +913,36 @@ public final class MainActivity extends Activity {
                     .replace("Scooter authentication: NOT STARTED", "Scooter authentication: VERIFIED"));
             });
         } else if(r.command==NinebotProbe.READ_RESP) {
+            if(verifyingSetting) {
+                verifyingSetting=false;settingWritePending=false;
+                int index=requestedSettingIndex, desired=requestedSettingValue;
+                if(r.payload.length<2) {
+                    setProtocolStatus("Setting readback too short — result unverified; share log");
+                    record("Setting readback invalid");
+                    readButton.setEnabled(true);
+                    return;
+                }
+                long observed=NinebotProbe.unsignedLE(r.payload);
+                if(observed==desired) {
+                    record("Setting 0x"+Integer.toHexString(index)+
+                          " VERIFIED by readback, value "+observed);
+                    if(index==0x76)currentVolume=(int)observed;
+                    if(index==0x49)currentAutoOff=(int)observed;
+                    setProtocolStatus("Setting VERIFIED by scooter: "+
+                        (index==0x76?"Sound volume":"Auto power-off")+
+                        " = "+observed+(index==0x76?"%":" min"));
+                    volumeButton.setEnabled(NinebotProbe.allowedSettingWrite(0x76,currentVolume));
+                    autoOffButton.setEnabled(NinebotProbe.allowedSettingWrite(0x49,currentAutoOff));
+                }else{
+                    record("Setting 0x"+Integer.toHexString(index)+
+                        " mismatch: requested "+desired+" read "+observed);
+                    setProtocolStatus("Setting NOT VERIFIED: requested "+desired+
+                        " but read "+observed+". Do not repeat; share log.");
+                    volumeButton.setEnabled(false);autoOffButton.setEnabled(false);
+                }
+                readButton.setEnabled(true);
+                return;
+            }
             int step=readStep;
             int index=readIndexes[step];
             int expectedLength=readLengths[step];
@@ -807,8 +962,10 @@ public final class MainActivity extends Activity {
                 case 0x42:
                     line="Start speed: "+((v>=3 && v<=5)?v+" km/h":"unverified raw "+v);break;
                 case 0x49:
+                    currentAutoOff=(v>=1&&v<=30)?(int)v:-1;
                     line="Auto power-off: "+((v>=1 && v<=30)?v+" min":"unverified raw "+v);break;
                 case 0x76:
+                    currentVolume=(v>=5&&v<=100)?(int)v:-1;
                     line="Sound volume: "+((v>=5 && v<=100)?v+"%":"unverified raw "+v);break;
                 case 0x4A:
                     line="Custom button: "+(v==6?"Hazard lights":v==4?"Energy recovery level":v==7?"Boost":"unverified raw "+v);break;

@@ -17,6 +17,14 @@ public final class CryptoSmokeTest {
         0x56,0,0x2B,0x3B,0x34,0x78,0x0A,0x5D
     };
     public static void main(String[] args) throws Exception {
+        require(NinebotProbe.allowedSettingWrite(0x49,30),"Auto-off 30 should be allowed");
+        require(NinebotProbe.allowedSettingWrite(0x76,80),"Volume 80 should be allowed");
+        require(!NinebotProbe.allowedSettingWrite(0x49,0),"Invalid auto-off must be blocked");
+        require(!NinebotProbe.allowedSettingWrite(0x76,101),"Invalid volume must be blocked");
+        require(!NinebotProbe.allowedSettingWrite(0x42,5),"Kick-start modification must be blocked");
+        require(!NinebotProbe.allowedSettingWrite(0x70,2),"Regen modification must be blocked");
+        require(!NinebotProbe.allowedSettingWrite(0x82,85),"BMS modifications must be blocked");
+        System.out.println("PASS settings write allowlist and bounds");
         for(boolean gen2:new boolean[]{false,true}) {
             NinebotProbe probe=new NinebotProbe();
             probe.setGeneration(gen2);

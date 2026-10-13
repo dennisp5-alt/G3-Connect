@@ -12,13 +12,15 @@ import javax.crypto.spec.SecretKeySpec;
  * Ported independently to Java from the MIT-licensed public protocol description:
  * https://codeberg.org/NootNooot/segway-ninebot-ble
  *
- * THIS CLASS NEVER GENERATES OR SENDS SET_PWD, CONFIGURATION, OR FIRMWARE COMMANDS.
- * All commands constructed by this class are PRE_COMM, AUTH or READ.
+ * Never generates SET_PWD, firmware, speed-limit, motor or brake commands.
+ * Only authenticated allowlisted sound-volume / auto-off configuration writes
+ * are possible; callers must explicitly confirm and verify the readback.
  *
  * These are experimental diagnostics on unverified G3 firmware. No key is persisted.
  */
 final class NinebotProbe {
     static final int PRE_COMM = 0x5B, AUTH = 0x5D, READ = 0x01, READ_RESP = 0x04;
+    static final int WRITE_NO_REPLY = 0x03;
     private static final int BOARD_BLE = 4, BOARD_VCU = 0x16;
     private final Crypto crypto = new Crypto();
     private byte[] authParameter;
@@ -94,6 +96,18 @@ final class NinebotProbe {
             if(length!=2)throw new GeneralSecurityException("Register requires 2 bytes");
         }else throw new GeneralSecurityException("Register not on read-only allowlist");
         return crypto.encrypt(frame(BOARD_VCU,READ,register,new byte[]{(byte)length}));
+    }
+    static boolean allowedSettingWrite(int register,int value) {
+        // Only low-risk controls already documented and read back on G3 hardware.
+        return (register==0x49 && value>=1 && value<=30)
+            || (register==0x76 && value>=5 && value<=100);
+    }
+    byte[] writeSetting(int register,int value) throws GeneralSecurityException {
+        if(!authenticated) throw new GeneralSecurityException("Scooter is not authenticated");
+        if(!allowedSettingWrite(register,value))
+            throw new GeneralSecurityException("Setting or value not allowed");
+        byte[] payload={(byte)(value&255),(byte)((value>>>8)&255)};
+        return crypto.encrypt(frame(BOARD_VCU,WRITE_NO_REPLY,register,payload));
     }
     Packet decrypt(byte[] data) throws GeneralSecurityException {return crypto.decrypt(data);}
     Reply parse(byte[] clear) throws GeneralSecurityException {
