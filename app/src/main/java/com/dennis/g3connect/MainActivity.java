@@ -81,6 +81,7 @@ public final class MainActivity extends Activity {
     private final int[] readIndexes = {0x55,0x62,0x5F,0x6B,0x5A,0x70,0x42,0x49,0x76,0x4A};
     private final int[] readLengths = {2,4,2,2,2,2,2,2,2,2};
     private TextView rideData, settingsData;
+    private Button readButton, volumeButton, autoOffButton;
     private final Runnable operationTimeout = () -> {
         if(waitingCommand<0)return;
         int failed=waitingCommand;
@@ -122,7 +123,7 @@ public final class MainActivity extends Activity {
     private int packetCount;
     private TextView status, details, log, protocolStatus;
     private EditText pairingKey;
-    private Button probeButton, authButton, readButton, volumeButton, autoOffButton;
+    private Button probeButton, authButton;
     private LinearLayout deviceList;
     private Button scanButton, disconnectButton;
 
