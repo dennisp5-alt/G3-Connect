@@ -25,6 +25,9 @@ final class NinebotProbe {
     private String serial = "";
     private boolean paired;
     private boolean authenticated;
+    private boolean gen2;
+    private byte sync2=(byte)0xB5;
+    private String currentName = "";
 
     static final class Reply {
         final int command, index;
@@ -41,6 +44,13 @@ final class NinebotProbe {
     void reset() {
         authParameter=null; serial=""; paired=false;authenticated=false;crypto.reset();
     }
+    void setGeneration(boolean isGen2) {
+        gen2=isGen2;
+        sync2=(byte)(isGen2?0xA5:0xB5);
+        crypto.setGen2(isGen2);
+    }
+    byte expectedSync2() {return sync2;}
+    String generationName() {return gen2?"Gen2/Nordic":"Gen3/Ninebot";}
     boolean hasChallenge() { return authParameter!=null; }
     boolean hasStoredPassword() { return paired; }
     boolean isAuthenticated() { return authenticated; }
@@ -53,7 +63,8 @@ final class NinebotProbe {
     byte[] beginProbe(String advertisedName) throws GeneralSecurityException {
         if(advertisedName==null || advertisedName.isEmpty()) throw new GeneralSecurityException("Missing device name");
         reset();
-        crypto.setKey(advertisedName.getBytes(StandardCharsets.US_ASCII),null);
+        currentName=advertisedName;
+        crypto.setKey(advertisedName.getBytes(StandardCharsets.US_ASCII),gen2?Crypto.FW_DATA:null);
         return crypto.encrypt(frame(BOARD_BLE,PRE_COMM,0,new byte[0]));
     }
     byte[] beginAuthentication(String passwordHex) throws GeneralSecurityException {
@@ -80,7 +91,7 @@ final class NinebotProbe {
     }
     Packet decrypt(byte[] data) throws GeneralSecurityException {return crypto.decrypt(data);}
     Reply parse(byte[] clear) throws GeneralSecurityException {
-        if(clear.length<7 || clear[0]!=(byte)0x5A || clear[1]!=(byte)0xB5)
+        if(clear.length<7 || clear[0]!=(byte)0x5A || clear[1]!=sync2)
             throw new GeneralSecurityException("Unrecognised response frame");
         int length=clear[2]&255;
         if(clear.length!=length+7)throw new GeneralSecurityException("Invalid frame size");
@@ -99,9 +110,9 @@ final class NinebotProbe {
         if(r.command!=AUTH || r.index!=1) throw new GeneralSecurityException("Scooter did not confirm AUTH");
         authenticated=true;
     }
-    static byte[] frame(int board,int cmd,int index,byte[] payload) {
+    byte[] frame(int board,int cmd,int index,byte[] payload) {
         byte[] f=new byte[7+payload.length];
-        f[0]=0x5A;f[1]=(byte)0xB5;f[2]=(byte)payload.length;f[3]=0x3E;
+        f[0]=0x5A;f[1]=sync2;f[2]=(byte)payload.length;f[3]=0x3E;
         f[4]=(byte)board;f[5]=(byte)cmd;f[6]=(byte)index;
         System.arraycopy(payload,0,f,7,payload.length);
         return f;
@@ -115,6 +126,12 @@ final class NinebotProbe {
     /** Byte-equivalent Encryption2 Gen3 crypto, AES-128 ECB block primitive. */
     private static final class Crypto {
         private static final byte[] ZERO16=new byte[16];
+        private static final byte[] FW_DATA=new byte[]{
+            (byte)0x97,(byte)0xCF,(byte)0xB8,0x02,(byte)0x84,0x41,0x43,(byte)0xDE,
+            0x56,0,0x2B,0x3B,0x34,0x78,0x0A,0x5D
+        };
+        private byte[] ecbInput=ZERO16;
+        void setGen2(boolean gen2) {ecbInput=gen2?FW_DATA:ZERO16;}
         private byte[] aesKey;
         private byte[] auth=new byte[16];
         private int counter, lastRx=-1;
@@ -132,7 +149,7 @@ final class NinebotProbe {
             if(aesKey==null)throw new GeneralSecurityException("Key not initialized");
             byte[] pay=Arrays.copyOfRange(clear,3,clear.length);
             if(!sn) {
-                byte[] enc=xorSegments(pay,ecb(ZERO16));
+                byte[] enc=xorSegments(pay,ecb(ecbInput));
                 int sum=0;for(byte b:pay)sum+=(b&255);
                 int check=(~sum)&65535;
                 return concat(Arrays.copyOf(clear,3),enc,
