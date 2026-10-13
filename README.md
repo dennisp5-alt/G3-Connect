@@ -1,4 +1,4 @@
-# G3 Connect v0.2.1 — read-only protocol test
+# G3 Connect v0.2.2 — read-only protocol test
 
 Android native Bluetooth Low Energy utility for the MAX G3. This build is **experimental and read-only**. It never registers a new pairing password, changes scooter settings, flashes firmware, or changes your Segway account binding.
 
@@ -36,9 +36,14 @@ Protocol independently implemented for Android from published **MIT-licensed** w
 ## Next
 On-device PRE_COMM confirmation, AES authentication validation, and reliable readback. Only then consider adding safety-checked settings writes.
 
-## v0.2.1 diagnostic additions
+## v0.2.2 diagnostic additions
 Your scooter's advertised BLE name was confirmed against the serial displayed in ScooterHacking Utility. Its BLE/VCU/MCU/BMS versions and odometer are useful test references, but the UI's snapshot date may be historical.
 
 PRE_COMM previously timed out. This build attempts (1) Gen3 proprietary service write without response, (2) Gen3 with response, (3) Gen2 Nordic UART without response and (4) Gen2 Nordic with response. The two service notification characteristics are subscribed independently. Each attempt waits 3.2 seconds; unsuccessful attempts move to the next candidate automatically. No SET_PWD, firmware flashing, region manipulation or setting change is sent.
 
 The separate CPU IDs (`vcu`, `mcu`) and six-byte `*_rand` registers reported by ScooterHacking relate to controller identities/firmware security. They are not the existing 16-byte BLE pairing key and are not stored, sent or embedded in G3 Connect. Do not publish them.
+
+## v0.2.2 encrypted-handshake repair
+G3 Connect v0.2.1 observed a Nordic notification during Gen2 PRE_COMM but decoded it as the unrelated command `0x1C`. The Gen2 receive path had a reproducible bug: it always used the zero keystream input, although Gen2 uses the firmware constant `FW_DATA`. The input now matches the transmit path, and non-SN frames undergo a checksum check before their command or serial information is trusted.
+
+A deterministic Java smoke test now constructs synthetic Gen2 and Gen3 PRE_COMM responses and verifies round-trip command decoding, serial parsing and rejection of incorrect keys before the Android APK is built. This is a software validation, **not proof of successful scooter authentication**. Keep the scooter parked and do not enter the scooter's controller CPU IDs/random registers as a Bluetooth key. Existing pairing is preserved; SET_PWD is never sent.

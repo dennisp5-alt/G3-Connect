@@ -26,22 +26,27 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
+      - name: Regression test Gen2 and Gen3 encrypted PRE_COMM
+        run: |
+          mkdir -p "$RUNNER_TEMP/g3-test"
+          javac -d "$RUNNER_TEMP/g3-test" app/src/main/java/com/dennis/g3connect/NinebotProbe.java tools/CryptoSmokeTest.java
+          java -cp "$RUNNER_TEMP/g3-test" com.dennis.g3connect.CryptoSmokeTest
       - name: Compile debug APK
         run: gradle --no-daemon :app:assembleDebug
       - uses: actions/upload-artifact@v4
         with:
-          name: G3-Connect-v0.2.1-Diagnostic-APK
+          name: G3-Connect-v0.2.2-Diagnostic-APK
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
       - name: Publish direct APK download
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk G3Connect-v0.2.1.apk
-          if gh release view v0.2.1 >/dev/null 2>&1; then
-            gh release upload v0.2.1 G3Connect-v0.2.1.apk --clobber
+          cp app/build/outputs/apk/debug/app-debug.apk G3Connect-v0.2.2.apk
+          if gh release view v0.2.2 >/dev/null 2>&1; then
+            gh release upload v0.2.2 G3Connect-v0.2.2.apk --clobber
           else
-            gh release create v0.2.1 G3Connect-v0.2.1.apk --target "$GITHUB_SHA" \
-              --title "G3 Connect v0.2.1 - Read-only G3 protocol test" \
+            gh release create v0.2.2 G3Connect-v0.2.2.apk --target "$GITHUB_SHA" \
+              --title "G3 Connect v0.2.2 - Read-only G3 protocol test" \
               --notes "Read-only G3 protocol probe, optional existing-key AUTH, battery/mileage/range reads. No pairing or settings writes."
           fi

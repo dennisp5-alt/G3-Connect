@@ -114,7 +114,7 @@ public final class MainActivity extends Activity {
         BluetoothManager manager = (BluetoothManager) getSystemService(BLUETOOTH_SERVICE);
         adapter = manager == null ? null : manager.getAdapter();
         buildUi();
-        record("G3 Connect v0.2.1 — diagnostic mode");
+        record("G3 Connect v0.2.2 — diagnostic mode");
         if (adapter == null) setStatus("Bluetooth unavailable");
         systemCheck();
     }
@@ -725,7 +725,8 @@ public final class MainActivity extends Activity {
             try {
                 NinebotProbe.Packet packet=protocol.decrypt(frame);
                 if(packet.error!=0){
-                    record("Reply could not be decrypted; status="+packet.error);
+                    record("Reply failed decryption; status="+packet.error+
+                         (packet.error==-4?" (non-SN checksum mismatch; wrong key or mode)":"" ));
                     continue;
                 }
                 NinebotProbe.Reply reply=protocol.parse(packet.plaintext);
@@ -739,7 +740,8 @@ public final class MainActivity extends Activity {
     }
     private void handleReply(NinebotProbe.Reply r) throws GeneralSecurityException {
         if(r.command!=waitingCommand) {
-            record("Received unsolicited command 0x"+Integer.toHexString(r.command));
+            record("Unexpected decoded command 0x"+Integer.toHexString(r.command)+
+                   " while awaiting 0x"+Integer.toHexString(waitingCommand));
             return;
         }
         if(r.command==NinebotProbe.READ_RESP && r.index!=waitingIndex) {

@@ -8,7 +8,7 @@ import javax.crypto.Cipher;
 import javax.crypto.spec.SecretKeySpec;
 
 /**
- * Limited, locally executed Ninebot Encryption2 (Gen3) protocol implementation.
+ * Limited, locally executed Ninebot Encryption2 (Gen2 / Gen3) protocol implementation.
  * Ported independently to Java from the MIT-licensed public protocol description:
  * https://codeberg.org/NootNooot/segway-ninebot-ble
  *
@@ -174,7 +174,17 @@ final class NinebotProbe {
             byte[] head=Arrays.copyOf(data,3);
             int ctr=((data[data.length-2]&255)<<8)|(data[data.length-1]&255);
             byte[] pay=Arrays.copyOfRange(data,3,data.length-6);
-            if(ctr==0)return new Packet(concat(head,xorSegments(pay,ecb(ZERO16))),0);
+            if(ctr==0) {
+                // Critical: Gen2 (Nordic) uses FW_DATA here; Gen3 uses zeros.
+                // v0.2.1 incorrectly always used zeros for incoming PRE_COMM.
+                byte[] decoded=xorSegments(pay,ecb(ecbInput));
+                int sum=0;
+                for(byte b:decoded)sum+=(b&255);
+                int expected=(~sum)&0xFFFF;
+                int received=(data[data.length-4]&255)|((data[data.length-3]&255)<<8);
+                if(expected!=received)return new Packet(null,-4);
+                return new Packet(concat(head,decoded),0);
+            }
             if(ctr<=lastRx)return new Packet(null,-3);
             byte[] n=nonce(ctr);
             byte[] plain=new byte[pay.length];
