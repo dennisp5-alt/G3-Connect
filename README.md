@@ -1,4 +1,4 @@
-# G3 Connect v0.2.0 — read-only protocol test
+# G3 Connect v0.2.1 — read-only protocol test
 
 Android native Bluetooth Low Energy utility for the MAX G3. This build is **experimental and read-only**. It never registers a new pairing password, changes scooter settings, flashes firmware, or changes your Segway account binding.
 
@@ -35,3 +35,10 @@ Protocol independently implemented for Android from published **MIT-licensed** w
 
 ## Next
 On-device PRE_COMM confirmation, AES authentication validation, and reliable readback. Only then consider adding safety-checked settings writes.
+
+## v0.2.1 diagnostic additions
+Your scooter's advertised BLE name was confirmed against the serial displayed in ScooterHacking Utility. Its BLE/VCU/MCU/BMS versions and odometer are useful test references, but the UI's snapshot date may be historical.
+
+PRE_COMM previously timed out. This build attempts (1) Gen3 proprietary service write without response, (2) Gen3 with response, (3) Gen2 Nordic UART without response and (4) Gen2 Nordic with response. The two service notification characteristics are subscribed independently. Each attempt waits 3.2 seconds; unsuccessful attempts move to the next candidate automatically. No SET_PWD, firmware flashing, region manipulation or setting change is sent.
+
+The separate CPU IDs (`vcu`, `mcu`) and six-byte `*_rand` registers reported by ScooterHacking relate to controller identities/firmware security. They are not the existing 16-byte BLE pairing key and are not stored, sent or embedded in G3 Connect. Do not publish them.
