@@ -81,7 +81,12 @@ public final class MainActivity extends Activity {
     private final int[] readIndexes = {0x55,0x62,0x5F,0x6B,0x5A,0x70,0x42,0x49,0x76,0x4A};
     private final int[] readLengths = {2,4,2,2,2,2,2,2,2,2};
     private TextView rideData, settingsData;
-    private Button readButton, volumeButton, autoOffButton;
+    private Button readButton, volumeButton, autoOffButton, regenButton, bmsButton;
+    private TextView bmsData;
+    private int currentRegen=-1;
+    private int bmsPhase=0, bmsCandidate=0, bmsFoundBoard=-1;
+    private static final int[] BMS_CANDIDATES={0x07,0x22,0x23};
+    private boolean controlsReadReady=false;
     private final Runnable operationTimeout = () -> {
         if(waitingCommand<0)return;
         int failed=waitingCommand;
@@ -97,7 +102,24 @@ public final class MainActivity extends Activity {
                 record("Setting write could not be verified: register 0x"+Integer.toHexString(requestedSettingIndex));
                 settingWritePending=false;verifyingSetting=false;
                 setProtocolStatus("Setting change UNVERIFIED: no readback. Do not repeat; share diagnostic log.");
-                runOnUiThread(()->{volumeButton.setEnabled(false);autoOffButton.setEnabled(false);readButton.setEnabled(true);});
+                runOnUiThread(()->{
+                    volumeButton.setEnabled(false);autoOffButton.setEnabled(false);
+                    regenButton.setEnabled(false);readButton.setEnabled(true);
+                    bmsButton.setEnabled(protocol.isAuthenticated());
+                });
+                return;
+            }
+            if(failed==NinebotProbe.READ_RESP && bmsPhase!=0) {
+                final int phase=bmsPhase;
+                record("BMS read timeout; candidate board="+
+                       String.format(Locale.US,"0x%02X",BMS_CANDIDATES[Math.min(bmsCandidate,2)])+
+                       ", phase="+phase);
+                if(phase==1) {
+                    bmsCandidate++;
+                    handler.post(this::probeNextBms);
+                }else {
+                    finishBmsProbe("BMS found, but charge-limit register did not reply. No settings changed.");
+                }
                 return;
             }
             if(failed==NinebotProbe.READ_RESP && protocol.isAuthenticated()) {
@@ -136,7 +158,7 @@ public final class MainActivity extends Activity {
         BluetoothManager manager = (BluetoothManager) getSystemService(BLUETOOTH_SERVICE);
         adapter = manager == null ? null : manager.getAdapter();
         buildUi();
-        record("G3 Connect v0.4.1 — diagnostic mode");
+        record("G3 Connect v0.5.0 — diagnostic mode");
         if (adapter == null) setStatus("Bluetooth unavailable");
         systemCheck();
     }
@@ -241,6 +263,16 @@ public final class MainActivity extends Activity {
         settingsData.setBackgroundColor(panel);
         settingsData.setTextIsSelectable(true);
         root.addView(settingsData);
+        TextView batteryTitle=text("CHARGING LIMIT — READ-ONLY DIAGNOSTIC",13,muted,true);
+        LinearLayout.LayoutParams bp=new LinearLayout.LayoutParams(-1,-2);
+        bp.topMargin=dp(18);root.addView(batteryTitle,bp);
+        bmsData=text("Tap BMS CHECK after authentication and READ DATA. The app will look for the battery controller and read its voltage and charge limit. No charging configuration will be changed.",13,muted,false);
+        bmsData.setPadding(dp(12),dp(12),dp(12),dp(12));bmsData.setBackgroundColor(panel);
+        root.addView(bmsData);
+        bmsButton=new Button(this);bmsButton.setText("BMS CHECK (READ ONLY)");
+        bmsButton.setAllCaps(false);bmsButton.setEnabled(false);
+        bmsButton.setOnClickListener(v->startBmsProbe());
+        root.addView(bmsButton);
 
         TextView caution=text("OPTIONAL CHANGES — PARK SCOOTER FIRST\nSound volume and auto power-off only. Every change requires confirmation and a verified readback. No motor, speed, braking, region, or pairing changes.",12,muted,false);
         caution.setPadding(dp(8),dp(12),dp(8),dp(6));
@@ -250,7 +282,8 @@ public final class MainActivity extends Activity {
         root.addView(controlRow);
         volumeButton=addButton(controlRow,"SOUND VOLUME",()->chooseSetting(0x76));
         autoOffButton=addButton(controlRow,"AUTO POWER-OFF",()->chooseSetting(0x49));
-        volumeButton.setEnabled(false);autoOffButton.setEnabled(false);
+        regenButton=addButton(controlRow,"ENERGY RECOVERY",()->chooseSetting(0x70));
+        volumeButton.setEnabled(false);autoOffButton.setEnabled(false);regenButton.setEnabled(false);
 
         TextView logTitle = text("LOCAL DIAGNOSTIC LOG",13,muted,true);
         LinearLayout.LayoutParams logP = new LinearLayout.LayoutParams(-1,-2);
@@ -419,7 +452,8 @@ public final class MainActivity extends Activity {
         g3Write=null;nordicWrite=null;activeWrite=null;
         probeActive=false;probeAttempt=-1;mtuSize=23;g3Rx=0;nordicRx=0;
         settingWritePending=false;verifyingSetting=false;
-        currentVolume=-1;currentAutoOff=-1;
+        currentVolume=-1;currentAutoOff=-1;currentRegen=-1;
+        bmsPhase=0;bmsCandidate=0;bmsFoundBoard=-1;controlsReadReady=false;
         notifyReady=false;g3NotifyReady=false;nordicNotifyReady=false;
         recvBuffer.reset();subscriptions.clear();subscribing=false;
         probeButton.setEnabled(false);authButton.setEnabled(false);readButton.setEnabled(false);
@@ -439,6 +473,7 @@ public final class MainActivity extends Activity {
         handler.removeCallbacks(operationTimeout);
         waitingCommand=-1;
         probeActive=false;
+        bmsPhase=0;bmsFoundBoard=-1;controlsReadReady=false;
         settingWritePending=false;verifyingSetting=false;
         currentVolume=-1;currentAutoOff=-1;
         BluetoothGatt previous=gatt; gatt=null;
@@ -453,6 +488,8 @@ public final class MainActivity extends Activity {
         if(readButton!=null)readButton.setEnabled(false);
         if(volumeButton!=null)volumeButton.setEnabled(false);
         if(autoOffButton!=null)autoOffButton.setEnabled(false);
+        if(regenButton!=null)regenButton.setEnabled(false);
+        if(bmsButton!=null)bmsButton.setEnabled(false);
         setStatus("Disconnected");
     }
     private final BluetoothGattCallback callbacks = new BluetoothGattCallback() {
@@ -468,10 +505,12 @@ public final class MainActivity extends Activity {
                 protocol.reset();notifyReady=false;g3Write=null;nordicWrite=null;
                 probeActive=false;activeWrite=null;subscribing=false;
                 handler.removeCallbacks(operationTimeout);waitingCommand=-1;
-                settingWritePending=false;verifyingSetting=false;
+                settingWritePending=false;verifyingSetting=false;bmsPhase=0;
+                controlsReadReady=false;
                 runOnUiThread(() -> {
                     probeButton.setEnabled(false);authButton.setEnabled(false);readButton.setEnabled(false);
                     volumeButton.setEnabled(false);autoOffButton.setEnabled(false);
+                    regenButton.setEnabled(false);bmsButton.setEnabled(false);
                     setProtocolStatus("Disconnected");
                 });
                 client.close(); return;
@@ -543,7 +582,7 @@ public final class MainActivity extends Activity {
                     settingWritePending=false;verifyingSetting=false;
                     record("Settings transport write failed (GATT status="+statusCode+")");
                     setProtocolStatus("Setting write rejected; no change verified. Share log.");
-                    runOnUiThread(()->{volumeButton.setEnabled(false);autoOffButton.setEnabled(false);readButton.setEnabled(true);});
+                    runOnUiThread(()->{volumeButton.setEnabled(false);autoOffButton.setEnabled(false);regenButton.setEnabled(false);readButton.setEnabled(true);bmsButton.setEnabled(true);});
                     return;
                 }
                 record("Protocol write rejected (GATT status="+statusCode+")");
@@ -687,21 +726,29 @@ public final class MainActivity extends Activity {
             send(frame,NinebotProbe.AUTH,0);
         }catch(Exception e){setProtocolStatus("Authentication not started: "+e.getMessage());}
     }
+    private String regenLabel(int v) {
+        return v==0?"Off":v==1?"Low":v==2?"Standard":"Unknown ("+v+")";
+    }
     private void chooseSetting(int register) {
-        if(!protocol.isAuthenticated() || gatt==null || settingWritePending || waitingCommand>=0)
+        if(!protocol.isAuthenticated() || gatt==null || settingWritePending || bmsPhase!=0 || waitingCommand>=0 || !controlsReadReady)
             {setProtocolStatus("Authenticate and finish READ DATA before changing settings");return;}
-        final int current=register==0x76?currentVolume:currentAutoOff;
+        final int current=register==0x76?currentVolume:
+                          register==0x49?currentAutoOff:currentRegen;
         if(!NinebotProbe.allowedSettingWrite(register,current)) {
             setProtocolStatus("Current setting was not verified. Tap READ DATA first.");return;
         }
-        final int[] options=register==0x76
-            ?new int[]{20,40,60,80,100}
-            :new int[]{5,10,15,20,30};
+        final int[] options=register==0x76?new int[]{20,40,60,80,100}
+            :register==0x49?new int[]{5,10,15,20,30}
+            :new int[]{0,1,2};
         final String[] labels=new String[options.length];
-        for(int i=0;i<options.length;i++)labels[i]=options[i]+(register==0x76?"%":" min");
-        final String name=register==0x76?"Sound volume":"Auto power-off";
+        for(int i=0;i<options.length;i++)
+            labels[i]=register==0x70?regenLabel(options[i])
+                :options[i]+(register==0x76?"%":" min");
+        final String name=register==0x76?"Sound volume"
+                :register==0x49?"Auto power-off":"Energy recovery";
         new AlertDialog.Builder(this)
-            .setTitle(name+" — currently "+current+(register==0x76?"%":" min"))
+            .setTitle(name+" — currently "+(register==0x70?regenLabel(current):
+                current+(register==0x76?"%":" min")))
             .setItems(labels,(dialog,which)->{
                 final int desired=options[which];
                 if(desired==current) {
@@ -709,10 +756,13 @@ public final class MainActivity extends Activity {
                 }
                 new AlertDialog.Builder(this)
                     .setTitle("Confirm scooter setting")
-                    .setMessage("Scooter must be parked. Change "+name+" from "+
-                        current+(register==0x76?"%":" min")+" to "+
-                        desired+(register==0x76?"%":" min")+
-                        "?\\n\\nThe app will read the setting back. If verification fails, do not repeat until checking the scooter.")
+                    .setMessage("SCOOTER MUST BE PARKED. Change "+name+" from "+
+                        (register==0x70?regenLabel(current):current+(register==0x76?"%":" min"))+" to "+
+                        (register==0x70?regenLabel(desired):desired+(register==0x76?"%":" min"))+
+                        "?\\n\\n"+
+                        (register==0x70?
+                        "Regenerative braking changes how the scooter slows down. Before normal riding, test cautiously in a safe open area and use the regular brakes.\\n\\n":"")+
+                        "The app will read the setting back. If verification fails, do not repeat until checking the scooter.")
                     .setNegativeButton("Cancel",null)
                     .setPositiveButton("APPLY",(d,w)->applySetting(register,desired))
                     .show();
@@ -722,10 +772,11 @@ public final class MainActivity extends Activity {
     }
     private void applySetting(int register,int value) {
         if(!protocol.isAuthenticated() || !NinebotProbe.allowedSettingWrite(register,value)
-            || waitingCommand>=0 || settingWritePending || activeWrite==null || gatt==null) {
+            || waitingCommand>=0 || settingWritePending || bmsPhase!=0 || !controlsReadReady || activeWrite==null || gatt==null) {
             setProtocolStatus("Cannot change setting: connection or operation not ready");return;
         }
-        final int existing=register==0x76?currentVolume:currentAutoOff;
+        final int existing=register==0x76?currentVolume:
+                           register==0x49?currentAutoOff:currentRegen;
         if(!NinebotProbe.allowedSettingWrite(register,existing)) {
             setProtocolStatus("Cannot change unknown current value");return;
         }
@@ -744,7 +795,8 @@ public final class MainActivity extends Activity {
             if(!started) {setProtocolStatus("Bluetooth did not accept setting write");return;}
             settingWritePending=true;verifyingSetting=false;
             requestedSettingIndex=register;requestedSettingValue=value;
-            volumeButton.setEnabled(false);autoOffButton.setEnabled(false);readButton.setEnabled(false);
+            volumeButton.setEnabled(false);autoOffButton.setEnabled(false);
+            regenButton.setEnabled(false);bmsButton.setEnabled(false);readButton.setEnabled(false);
             record("One-shot setting command 0x03 sent for 0x"+Integer.toHexString(register)+
                    ": requested "+value+", was "+existing);
             setProtocolStatus("Setting requested. Waiting to verify actual scooter readback…");
@@ -772,9 +824,87 @@ public final class MainActivity extends Activity {
             readButton.setEnabled(true);
         }
     }
+    private void startBmsProbe() {
+        if(!protocol.isAuthenticated() || !controlsReadReady || gatt==null ||
+           waitingCommand>=0 || settingWritePending || bmsPhase!=0)return;
+        bmsPhase=1;bmsCandidate=0;bmsFoundBoard=-1;
+        bmsButton.setEnabled(false);
+        volumeButton.setEnabled(false);autoOffButton.setEnabled(false);regenButton.setEnabled(false);
+        readButton.setEnabled(false);
+        bmsData.setText("Searching for BMS using READ requests only…");
+        setProtocolStatus("BMS read-only diagnostic in progress");
+        probeNextBms();
+    }
+    private void probeNextBms() {
+        if(bmsPhase!=1)return;
+        if(bmsCandidate>=BMS_CANDIDATES.length) {
+            finishBmsProbe("No BMS board responded with a plausible pack voltage. Charge limit unavailable; no change made.");
+            return;
+        }
+        int board=BMS_CANDIDATES[bmsCandidate];
+        try {
+            record("BMS read-only voltage probe board 0x"+Integer.toHexString(board));
+            send(protocol.readBmsRegister(board,0x8C),NinebotProbe.READ_RESP,0x8C);
+        }catch(Exception e) {
+            record("BMS candidate error: "+e.getClass().getSimpleName());
+            bmsCandidate++;
+            handler.post(this::probeNextBms);
+        }
+    }
+    private void handleBmsReply(NinebotProbe.Reply reply) {
+        if(reply.payload.length<2) {
+            record("BMS short reply, phase "+bmsPhase);
+            if(bmsPhase==1) {bmsCandidate++;handler.post(this::probeNextBms);}
+            else finishBmsProbe("BMS charge-limit reading too short; no change made.");
+            return;
+        }
+        long raw=NinebotProbe.unsignedLE(reply.payload);
+        if(bmsPhase==1) {
+            if(raw<3500 || raw>6500) {
+                record("BMS candidate voltage implausible, raw="+raw);
+                bmsCandidate++;
+                handler.post(this::probeNextBms);
+                return;
+            }
+            int board=BMS_CANDIDATES[bmsCandidate];
+            bmsFoundBoard=board;bmsPhase=2;
+            String line=String.format(Locale.US,"Battery pack board 0x%02X: %.2f V",board,raw/100.0);
+            record(line);
+            runOnUiThread(()->bmsData.setText(line+"\nReading charge limit…"));
+            try {
+                send(protocol.readBmsRegister(board,0x82),NinebotProbe.READ_RESP,0x82);
+            }catch(Exception e){
+                record("BMS limit read start error: "+e.getClass().getSimpleName());
+                finishBmsProbe("BMS voltage found but charge limit read could not begin.");
+            }
+        }else if(bmsPhase==2) {
+            final String line=((raw>=80 && raw<=100 && raw%5==0)?
+                "Charging limit: "+raw+"% (read-only)":
+                "Charging limit: unverified raw "+raw);
+            record("BMS "+line);
+            runOnUiThread(()->bmsData.append("\n"+line));
+            finishBmsProbe("BMS read complete. No charging setting changed.");
+        }
+    }
+    private void finishBmsProbe(String message) {
+        bmsPhase=0;
+        record(message);
+        setProtocolStatus(message);
+        runOnUiThread(()->{
+            bmsButton.setEnabled(protocol.isAuthenticated());
+            readButton.setEnabled(protocol.isAuthenticated());
+            volumeButton.setEnabled(controlsReadReady && NinebotProbe.allowedSettingWrite(0x76,currentVolume));
+            autoOffButton.setEnabled(controlsReadReady && NinebotProbe.allowedSettingWrite(0x49,currentAutoOff));
+            regenButton.setEnabled(controlsReadReady && NinebotProbe.allowedSettingWrite(0x70,currentRegen));
+            if(bmsFoundBoard<0 || !message.contains("read complete"))
+                bmsData.append("\n"+message);
+        });
+    }
     private void readG3() {
         if(!protocol.isAuthenticated()){setProtocolStatus("Authenticate first");return;}
-        if(waitingCommand>=0 || settingWritePending)return;
+        if(waitingCommand>=0 || settingWritePending || bmsPhase!=0)return;
+        controlsReadReady=false;
+        volumeButton.setEnabled(false);autoOffButton.setEnabled(false);regenButton.setEnabled(false);
         readStep=0;
         rideData.setText("Reading scooter telemetry…");
         settingsData.setText("Reading current settings (no writes)…");
@@ -784,8 +914,11 @@ public final class MainActivity extends Activity {
     private void readNext() {
         if(readStep>=readIndexes.length) {
             setProtocolStatus("Authenticated — readings complete. Settings available where verified.");
+            controlsReadReady=true;
             volumeButton.setEnabled(NinebotProbe.allowedSettingWrite(0x76,currentVolume));
             autoOffButton.setEnabled(NinebotProbe.allowedSettingWrite(0x49,currentAutoOff));
+            regenButton.setEnabled(NinebotProbe.allowedSettingWrite(0x70,currentRegen));
+            bmsButton.setEnabled(true);
             return;
         }
         try {
@@ -925,6 +1058,8 @@ public final class MainActivity extends Activity {
                     runOnUiThread(()->{
                         volumeButton.setEnabled(false);
                         autoOffButton.setEnabled(false);
+                        regenButton.setEnabled(false);
+                        bmsButton.setEnabled(true);
                         readButton.setEnabled(true);
                     });
                     return;
@@ -935,12 +1070,16 @@ public final class MainActivity extends Activity {
                           " VERIFIED by readback, value "+observed);
                     if(index==0x76)currentVolume=(int)observed;
                     if(index==0x49)currentAutoOff=(int)observed;
+                    if(index==0x70)currentRegen=(int)observed;
                     setProtocolStatus("Setting VERIFIED by scooter: "+
-                        (index==0x76?"Sound volume":"Auto power-off")+
-                        " = "+observed+(index==0x76?"%":" min"));
+                        (index==0x76?"Sound volume":index==0x49?"Auto power-off":"Energy recovery")+
+                        " = "+(index==0x70?regenLabel((int)observed):
+                              observed+(index==0x76?"%":" min")));
                     runOnUiThread(()->{
                         volumeButton.setEnabled(NinebotProbe.allowedSettingWrite(0x76,currentVolume));
                         autoOffButton.setEnabled(NinebotProbe.allowedSettingWrite(0x49,currentAutoOff));
+                        regenButton.setEnabled(NinebotProbe.allowedSettingWrite(0x70,currentRegen));
+                        bmsButton.setEnabled(true);
                         readButton.setEnabled(true);
                     });
                 }else {
@@ -951,9 +1090,15 @@ public final class MainActivity extends Activity {
                     runOnUiThread(()->{
                         volumeButton.setEnabled(false);
                         autoOffButton.setEnabled(false);
+                        regenButton.setEnabled(false);
+                        bmsButton.setEnabled(true);
                         readButton.setEnabled(true);
                     });
                 }
+                return;
+            }
+            if(bmsPhase!=0) {
+                handleBmsReply(r);
                 return;
             }
             int step=readStep;
@@ -971,7 +1116,8 @@ public final class MainActivity extends Activity {
                 case 0x5A:
                     line="Ride mode: "+(v==1?"Walk":v==2?"Eco":v==3?"Sport":v==5?"Drive":"unverified raw "+v);break;
                 case 0x70:
-                    line="Energy recovery: "+(v==0?"Off":v==1?"Low":v==2?"Standard":"unverified raw "+v);break;
+                    currentRegen=v<=2?(int)v:-1;
+                    line="Energy recovery: "+(v<=2?regenLabel((int)v):"unverified raw "+v);break;
                 case 0x42:
                     line="Start speed: "+((v>=3 && v<=5)?v+" km/h":"unverified raw "+v);break;
                 case 0x49:

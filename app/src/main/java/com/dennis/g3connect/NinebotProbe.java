@@ -13,7 +13,7 @@ import javax.crypto.spec.SecretKeySpec;
  * https://codeberg.org/NootNooot/segway-ninebot-ble
  *
  * Never generates SET_PWD, firmware, speed-limit, motor or brake commands.
- * Only authenticated allowlisted sound-volume / auto-off configuration writes
+ * Only authenticated allowlisted sound-volume / auto-off / regen configuration writes
  * are possible; callers must explicitly confirm and verify the readback.
  *
  * These are experimental diagnostics on unverified G3 firmware. No key is persisted.
@@ -87,7 +87,7 @@ final class NinebotProbe {
     }
     byte[] readRegister(int register, int length) throws GeneralSecurityException {
         if(!authenticated) throw new GeneralSecurityException("Not authenticated");
-        // Explicit MAX G3 VCU read-only allowlist. No write operations are available.
+        // Explicit MAX G3 VCU read-only allowlist. Settings writes use a separate guarded path.
         if(register==0x62) {
             if(length!=4)throw new GeneralSecurityException("Odometer requires 4 bytes");
         }else if(register==0x55 || register==0x5F || register==0x6B ||
@@ -97,10 +97,19 @@ final class NinebotProbe {
         }else throw new GeneralSecurityException("Register not on read-only allowlist");
         return crypto.encrypt(frame(BOARD_VCU,READ,register,new byte[]{(byte)length}));
     }
+    byte[] readBmsRegister(int board,int register) throws GeneralSecurityException {
+        if(!authenticated)throw new GeneralSecurityException("Not authenticated");
+        if(board!=0x07 && board!=0x22 && board!=0x23)
+            throw new GeneralSecurityException("Unsupported BMS candidate board");
+        if(register!=0x8C && register!=0x82)
+            throw new GeneralSecurityException("BMS register not in read-only allowlist");
+        return crypto.encrypt(frame(board,READ,register,new byte[]{2}));
+    }
     static boolean allowedSettingWrite(int register,int value) {
-        // Only low-risk controls already documented and read back on G3 hardware.
+        // Confirmed VCU control indexes: energy recovery, auto-off and sound.
         return (register==0x49 && value>=1 && value<=30)
-            || (register==0x76 && value>=5 && value<=100);
+            || (register==0x76 && value>=5 && value<=100)
+            || (register==0x70 && value>=0 && value<=2);
     }
     byte[] writeSetting(int register,int value) throws GeneralSecurityException {
         if(!authenticated) throw new GeneralSecurityException("Scooter is not authenticated");

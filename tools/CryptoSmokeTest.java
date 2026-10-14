@@ -21,9 +21,17 @@ public final class CryptoSmokeTest {
         require(NinebotProbe.allowedSettingWrite(0x76,80),"Volume 80 should be allowed");
         require(!NinebotProbe.allowedSettingWrite(0x49,0),"Invalid auto-off must be blocked");
         require(!NinebotProbe.allowedSettingWrite(0x76,101),"Invalid volume must be blocked");
+        require(NinebotProbe.allowedSettingWrite(0x70,0),"Regen OFF allowed");
+        require(NinebotProbe.allowedSettingWrite(0x70,1),"Regen LOW allowed");
+        require(NinebotProbe.allowedSettingWrite(0x70,2),"Regen STANDARD allowed");
+        require(!NinebotProbe.allowedSettingWrite(0x70,3),"Unsupported regen level must be blocked");
         require(!NinebotProbe.allowedSettingWrite(0x42,5),"Kick-start modification must be blocked");
-        require(!NinebotProbe.allowedSettingWrite(0x70,2),"Regen modification must be blocked");
+        require(!NinebotProbe.allowedSettingWrite(0x4A,8),"Unverified custom button blocked");
         require(!NinebotProbe.allowedSettingWrite(0x82,85),"BMS modifications must be blocked");
+        NinebotProbe virgin=new NinebotProbe();
+        boolean blocked=false;
+        try {virgin.readBmsRegister(0x07,0x8C);}catch(java.security.GeneralSecurityException e){blocked=true;}
+        require(blocked,"BMS access before authentication must be blocked");
         System.out.println("PASS settings write allowlist and bounds");
         for(boolean gen2:new boolean[]{false,true}) {
             NinebotProbe probe=new NinebotProbe();
