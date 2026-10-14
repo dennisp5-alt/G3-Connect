@@ -35,18 +35,18 @@ jobs:
         run: gradle --no-daemon :app:assembleDebug
       - uses: actions/upload-artifact@v4
         with:
-          name: G3-Connect-v0.4.0-Diagnostic-APK
+          name: G3-Connect-v0.4.1-Diagnostic-APK
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
       - name: Publish direct APK download
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk G3Connect-v0.4.0.apk
-          if gh release view v0.4.0 >/dev/null 2>&1; then
-            gh release upload v0.4.0 G3Connect-v0.4.0.apk --clobber
+          cp app/build/outputs/apk/debug/app-debug.apk G3Connect-v0.4.1.apk
+          if gh release view v0.4.1 >/dev/null 2>&1; then
+            gh release upload v0.4.1 G3Connect-v0.4.1.apk --clobber
           else
-            gh release create v0.4.0 G3Connect-v0.4.0.apk --target "$GITHUB_SHA" \
-              --title "G3 Connect v0.4.0 - First confirmed setting controls with readback" \
+            gh release create v0.4.1 G3Connect-v0.4.1.apk --target "$GITHUB_SHA" \
+              --title "G3 Connect v0.4.1 - UI thread fix for verified setting controls" \
               --notes "Authenticated G3 settings. Sound volume and auto power-off controls only, each with confirmation and readback verification; no pairing changes."
           fi

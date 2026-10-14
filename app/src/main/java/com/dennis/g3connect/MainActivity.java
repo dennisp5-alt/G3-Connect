@@ -136,7 +136,7 @@ public final class MainActivity extends Activity {
         BluetoothManager manager = (BluetoothManager) getSystemService(BLUETOOTH_SERVICE);
         adapter = manager == null ? null : manager.getAdapter();
         buildUi();
-        record("G3 Connect v0.4.0 — diagnostic mode");
+        record("G3 Connect v0.4.1 — diagnostic mode");
         if (adapter == null) setStatus("Bluetooth unavailable");
         systemCheck();
     }
@@ -915,15 +915,21 @@ public final class MainActivity extends Activity {
             });
         } else if(r.command==NinebotProbe.READ_RESP) {
             if(verifyingSetting) {
-                verifyingSetting=false;settingWritePending=false;
-                int index=requestedSettingIndex, desired=requestedSettingValue;
+                verifyingSetting=false;
+                settingWritePending=false;
+                final int index=requestedSettingIndex;
+                final int desired=requestedSettingValue;
                 if(r.payload.length<2) {
                     setProtocolStatus("Setting readback too short — result unverified; share log");
                     record("Setting readback invalid");
-                    readButton.setEnabled(true);
+                    runOnUiThread(()->{
+                        volumeButton.setEnabled(false);
+                        autoOffButton.setEnabled(false);
+                        readButton.setEnabled(true);
+                    });
                     return;
                 }
-                long observed=NinebotProbe.unsignedLE(r.payload);
+                final long observed=NinebotProbe.unsignedLE(r.payload);
                 if(observed==desired) {
                     record("Setting 0x"+Integer.toHexString(index)+
                           " VERIFIED by readback, value "+observed);
@@ -932,16 +938,22 @@ public final class MainActivity extends Activity {
                     setProtocolStatus("Setting VERIFIED by scooter: "+
                         (index==0x76?"Sound volume":"Auto power-off")+
                         " = "+observed+(index==0x76?"%":" min"));
-                    volumeButton.setEnabled(NinebotProbe.allowedSettingWrite(0x76,currentVolume));
-                    autoOffButton.setEnabled(NinebotProbe.allowedSettingWrite(0x49,currentAutoOff));
-                }else{
+                    runOnUiThread(()->{
+                        volumeButton.setEnabled(NinebotProbe.allowedSettingWrite(0x76,currentVolume));
+                        autoOffButton.setEnabled(NinebotProbe.allowedSettingWrite(0x49,currentAutoOff));
+                        readButton.setEnabled(true);
+                    });
+                }else {
                     record("Setting 0x"+Integer.toHexString(index)+
                         " mismatch: requested "+desired+" read "+observed);
                     setProtocolStatus("Setting NOT VERIFIED: requested "+desired+
                         " but read "+observed+". Do not repeat; share log.");
-                    volumeButton.setEnabled(false);autoOffButton.setEnabled(false);
+                    runOnUiThread(()->{
+                        volumeButton.setEnabled(false);
+                        autoOffButton.setEnabled(false);
+                        readButton.setEnabled(true);
+                    });
                 }
-                readButton.setEnabled(true);
                 return;
             }
             int step=readStep;
