@@ -974,6 +974,10 @@ public final class MainActivity extends Activity {
         runOnUiThread(()->bmsData.append("\n"+line));
     }
     private void nextBmsDetail(){
+        if(bmsPhase==6){
+            finishBmsProbe("BMS diagnostics complete. No charging setting changed.");
+            return;
+        }
         if(bmsPhase<2 || bmsPhase>5)return;
         int reg=bmsPhase==2?0x82:bmsPhase==3?0xF9:bmsPhase==4?0x8D:0xA0;
         try{
@@ -1129,6 +1133,7 @@ public final class MainActivity extends Activity {
                 waitingCommand=-1;
                 record("ATT write could not be initiated");
                 if(probeActive)handler.post(this::nextProbeAttempt);
+                else if(bmsPhase==6 || bmsPhase==7) failChargeReadback("BMS transport write could not start");
                 else setProtocolStatus("BLE write could not start");
                 return;
             }
@@ -1139,6 +1144,7 @@ public final class MainActivity extends Activity {
             waitingCommand=-1;
             record("Bluetooth write error: "+e.getClass().getSimpleName());
             if(probeActive)handler.post(this::nextProbeAttempt);
+            else if(bmsPhase==6 || bmsPhase==7) failChargeReadback("BMS transport error: "+e.getClass().getSimpleName());
             else setProtocolStatus("Bluetooth write error: "+e.getClass().getSimpleName());
         }
     }
@@ -1193,7 +1199,8 @@ public final class MainActivity extends Activity {
                    " while awaiting 0x"+Integer.toHexString(waitingCommand));
             return;
         }
-        if(r.command==NinebotProbe.READ_RESP && r.index!=waitingIndex) {
+        if((r.command==NinebotProbe.READ_RESP || r.command==NinebotProbe.WRITE_RESP)
+            && r.index!=waitingIndex) {
             record("Received response for different register");return;
         }
         handler.removeCallbacks(operationTimeout);
