@@ -32,6 +32,12 @@ public final class CryptoSmokeTest {
             require(NinebotProbe.allowedChargeLimit(limit),"Expected supported charging limit "+limit);
         for(int limit:new int[]{0,50,79,81,99,101,255})
             require(!NinebotProbe.allowedChargeLimit(limit),"Invalid charging limit "+limit);
+        require(NinebotProbe.verifiedChargeLimitReadback(95,95),
+            "Matching BMS readback verifies setting regardless of missing ACK");
+        require(!NinebotProbe.verifiedChargeLimitReadback(95,100),
+            "Mismatched readback must never report charging-limit success");
+        require(!NinebotProbe.verifiedChargeLimitReadback(99,99),
+            "Invalid charging-limit value must not verify");
         NinebotProbe virgin=new NinebotProbe();
         boolean blocked=false;
         try {virgin.readBmsRegister(0x07,0x8C);}catch(java.security.GeneralSecurityException e){blocked=true;}

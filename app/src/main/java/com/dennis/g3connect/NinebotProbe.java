@@ -111,6 +111,10 @@ final class NinebotProbe {
     static boolean allowedChargeLimit(int value){
         return value>=80 && value<=100 && value%5==0;
     }
+    static boolean verifiedChargeLimitReadback(int requested,int observed){
+        // ACK status is not proof of persistence; register 0x82 readback is.
+        return allowedChargeLimit(requested) && requested==observed;
+    }
     byte[] writeChargeLimit(int board,int value) throws GeneralSecurityException {
         if(!authenticated)throw new GeneralSecurityException("Not authenticated");
         if(board!=0x07 && board!=0x22 && board!=0x23)

@@ -86,6 +86,7 @@ public final class MainActivity extends Activity {
     private int currentRegen=-1;
     private int bmsPhase=0, bmsCandidate=0, bmsFoundBoard=-1;
     private int bmsChargeLimit=-1, pendingChargeLimit=-1;
+    private boolean chargeWriteAckMatched=false;
     private boolean chargeControlLocked;
     private static final int[] BMS_CANDIDATES={0x07,0x22,0x23};
     private boolean controlsReadReady=false;
@@ -125,17 +126,16 @@ public final class MainActivity extends Activity {
                     runOnUiThread(()->bmsData.append("\nBattery field "+phase+": unavailable"));
                     bmsPhase=phase+1;
                     handler.post(this::nextBmsDetail);
-                }else if(phase==6 || phase==7) {
-                    chargeControlLocked=true;bmsChargeLimit=-1;
-                    bmsPhase=0;
-                    record("Charge-limit WRITE or readback did not respond; result UNKNOWN. No retry.");
-                    setProtocolStatus("Charging-limit result UNKNOWN. Do not repeat. Check in another app.");
-                    runOnUiThread(()->{
-                        bmsData.append("\nCharging change unverified. Check using another app before continuing.");
-                        chargeButton.setEnabled(false);
-                        readButton.setEnabled(true);bmsButton.setEnabled(true);
-                        restoreVcuButtons();
-                    });
+                }else if(phase==6) {
+                    // The Max G3 has been observed applying a BMS charge-limit write
+                    // without sending the expected ACK. No second WRITE is allowed.
+                    record("BMS 0x82 ACK timed out. Trying ONE read-only verification; NO write retry.");
+                    setProtocolStatus("No charge-limit ACK. Checking the actual BMS setting, read-only…");
+                    chargeWriteAckMatched=false;
+                    bmsPhase=7;
+                    handler.postDelayed(this::verifyChargeLimit,350);
+                }else if(phase==7) {
+                    failChargeReadback("Charging-limit readback timed out; result UNKNOWN");
                 }
                 return;
             }
@@ -175,7 +175,7 @@ public final class MainActivity extends Activity {
         BluetoothManager manager = (BluetoothManager) getSystemService(BLUETOOTH_SERVICE);
         adapter = manager == null ? null : manager.getAdapter();
         buildUi();
-        record("G3 Connect v0.6.0 — diagnostic mode");
+        record("G3 Connect v0.6.1 — diagnostic mode");
         if (adapter == null) setStatus("Bluetooth unavailable");
         systemCheck();
     }
@@ -476,7 +476,8 @@ public final class MainActivity extends Activity {
         settingWritePending=false;verifyingSetting=false;
         currentVolume=-1;currentAutoOff=-1;currentRegen=-1;
         bmsPhase=0;bmsCandidate=0;bmsFoundBoard=-1;
-        bmsChargeLimit=-1;pendingChargeLimit=-1;chargeControlLocked=false;
+        bmsChargeLimit=-1;pendingChargeLimit=-1;chargeWriteAckMatched=false;
+        chargeControlLocked=false;
         controlsReadReady=false;
         notifyReady=false;g3NotifyReady=false;nordicNotifyReady=false;
         recvBuffer.reset();subscriptions.clear();subscribing=false;
@@ -498,7 +499,7 @@ public final class MainActivity extends Activity {
         waitingCommand=-1;
         probeActive=false;
         bmsPhase=0;bmsFoundBoard=-1;bmsChargeLimit=-1;controlsReadReady=false;
-        chargeControlLocked=false;pendingChargeLimit=-1;
+        chargeControlLocked=false;pendingChargeLimit=-1;chargeWriteAckMatched=false;
         settingWritePending=false;verifyingSetting=false;
         currentVolume=-1;currentAutoOff=-1;
         BluetoothGatt previous=gatt; gatt=null;
@@ -607,12 +608,9 @@ public final class MainActivity extends Activity {
             if(client!=gatt)return;
             if(statusCode!=BluetoothGatt.GATT_SUCCESS) {
                 if(bmsPhase==6 || bmsPhase==7) {
-                    chargeControlLocked=true;bmsPhase=0;bmsChargeLimit=-1;
-                    setProtocolStatus("Charge-limit transport rejected. Result UNKNOWN; no retry.");
-                    runOnUiThread(()->{
-                        chargeButton.setEnabled(false);readButton.setEnabled(true);
-                        bmsButton.setEnabled(true);restoreVcuButtons();
-                    });
+                    handler.removeCallbacks(operationTimeout);
+                    waitingCommand=-1;
+                    failChargeReadback("Charge-limit transport rejected; result UNKNOWN");
                     return;
                 }
                 if(settingWritePending) {
@@ -865,7 +863,7 @@ public final class MainActivity extends Activity {
         if(!protocol.isAuthenticated() || !controlsReadReady || gatt==null ||
            waitingCommand>=0 || settingWritePending || bmsPhase!=0)return;
         bmsPhase=1;bmsCandidate=0;bmsFoundBoard=-1;
-        bmsChargeLimit=-1;chargeButton.setEnabled(false);
+        bmsChargeLimit=-1;chargeWriteAckMatched=false;chargeButton.setEnabled(false);
         bmsButton.setEnabled(false);
         volumeButton.setEnabled(false);autoOffButton.setEnabled(false);regenButton.setEnabled(false);
         readButton.setEnabled(false);
@@ -898,11 +896,14 @@ public final class MainActivity extends Activity {
                 return;
             }
             int observed=(int)NinebotProbe.unsignedLE(reply.payload);
-            if(observed==pendingChargeLimit && NinebotProbe.allowedChargeLimit(observed)) {
+            if(NinebotProbe.verifiedChargeLimitReadback(pendingChargeLimit,observed)) {
                 bmsChargeLimit=observed;pendingChargeLimit=-1;bmsPhase=0;
                 chargeControlLocked=false;
-                record("CHARGE LIMIT 0x82 VERIFIED by readback, value "+observed+"%");
-                setProtocolStatus("Charging limit VERIFIED: "+observed+"%. Confirm once more after reconnecting.");
+                record("CHARGE LIMIT 0x82 VERIFIED by readback, value "+observed+"%; "+
+                       (chargeWriteAckMatched?"ACK matched":"ACK missing or unrecognised"));
+                setProtocolStatus("Charging limit VERIFIED by readback: "+observed+
+                    "%. "+(chargeWriteAckMatched?"Write ACK received.":"Write ACK missing/unusual; no retry.")+
+                    " Confirm again after reconnecting.");
                 runOnUiThread(()->{
                     bmsData.append("\nCharging limit VERIFIED: "+observed+"%. Recheck after reconnect.");
                     readButton.setEnabled(true);bmsButton.setEnabled(true);
@@ -1040,7 +1041,7 @@ public final class MainActivity extends Activity {
            settingWritePending || gatt==null)return;
         try{
             byte[] cmd=protocol.writeChargeLimit(bmsFoundBoard,next);
-            bmsPhase=6;pendingChargeLimit=next;
+            bmsPhase=6;pendingChargeLimit=next;chargeWriteAckMatched=false;
             bmsButton.setEnabled(false);chargeButton.setEnabled(false);
             readButton.setEnabled(false);
             volumeButton.setEnabled(false);autoOffButton.setEnabled(false);regenButton.setEnabled(false);
@@ -1068,6 +1069,7 @@ public final class MainActivity extends Activity {
     private void failChargeReadback(String problem){
         record(problem);
         chargeControlLocked=true;bmsChargeLimit=-1;pendingChargeLimit=-1;bmsPhase=0;
+        chargeWriteAckMatched=false;
         setProtocolStatus(problem+". Do not repeat the write.");
         runOnUiThread(()->{
             bmsData.append("\n"+problem);
@@ -1199,9 +1201,17 @@ public final class MainActivity extends Activity {
                    " while awaiting 0x"+Integer.toHexString(waitingCommand));
             return;
         }
-        if((r.command==NinebotProbe.READ_RESP || r.command==NinebotProbe.WRITE_RESP)
-            && r.index!=waitingIndex) {
-            record("Received response for different register");return;
+        if(r.command==NinebotProbe.READ_RESP && r.index!=waitingIndex) {
+            record("Read response for another register (expected 0x"+
+                   Integer.toHexString(waitingIndex)+", got 0x"+Integer.toHexString(r.index)+")");
+            return;
+        }
+        if(r.command==NinebotProbe.WRITE_RESP && r.index!=waitingIndex) {
+            // Some firmware returns a different index in the WRITE ACK.
+            // It cannot establish success; verify the requested register instead.
+            record("WRITE response index differs: expected 0x"+
+                   Integer.toHexString(waitingIndex)+", got 0x"+
+                   Integer.toHexString(r.index)+". Readback required.");
         }
         handler.removeCallbacks(operationTimeout);
         waitingCommand=-1;
@@ -1227,7 +1237,10 @@ public final class MainActivity extends Activity {
                     .replace("Scooter authentication: NOT STARTED", "Scooter authentication: VERIFIED"));
             });
         } else if(r.command==NinebotProbe.WRITE_RESP && bmsPhase==6){
-            record("BMS charge-limit write ACK received; scheduling readback");
+            chargeWriteAckMatched=r.index==0x82;
+            record(chargeWriteAckMatched
+                ? "BMS charge-limit WRITE ACK matched; verifying actual 0x82 value"
+                : "BMS WRITE reply with unusual register; verifying actual 0x82 value");
             bmsPhase=7;
             handler.postDelayed(this::verifyChargeLimit,350);
             return;
