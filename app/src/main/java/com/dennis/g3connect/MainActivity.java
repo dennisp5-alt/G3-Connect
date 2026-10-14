@@ -99,7 +99,7 @@ public final class MainActivity extends Activity {
         if(failed==NinebotProbe.PRE_COMM && probeActive) {
             handler.post(this::nextProbeAttempt);
         }else if(failed==NinebotProbe.AUTH) {
-            setProtocolStatus("AUTH unanswered: existing key may be wrong or firmware needs reassertion; no pairing attempted.");
+            setProtocolStatus("AUTH unanswered. No pairing or key changes occurred. DISCONNECT, reconnect and PROBE before trying an alternate AUTH format.");
         }else {
             if(failed==NinebotProbe.READ_RESP && verifyingSetting) {
                 record("Setting write could not be verified: register 0x"+Integer.toHexString(requestedSettingIndex));
@@ -162,7 +162,7 @@ public final class MainActivity extends Activity {
     private int packetCount;
     private TextView status, details, log, protocolStatus;
     private EditText pairingKey;
-    private Button probeButton, authButton;
+    private Button probeButton, authButton, emptyAuthButton;
     private LinearLayout deviceList;
     private Button scanButton, disconnectButton;
 
@@ -175,7 +175,7 @@ public final class MainActivity extends Activity {
         BluetoothManager manager = (BluetoothManager) getSystemService(BLUETOOTH_SERVICE);
         adapter = manager == null ? null : manager.getAdapter();
         buildUi();
-        record("G3 Connect v0.6.1 — diagnostic mode");
+        record("G3 Connect v0.6.2 — diagnostic mode");
         if (adapter == null) setStatus("Bluetooth unavailable");
         systemCheck();
     }
@@ -266,8 +266,16 @@ public final class MainActivity extends Activity {
         root.addView(pairingKey);
         authButton=new Button(this);authButton.setAllCaps(false);authButton.setText("AUTHENTICATE USING EXISTING KEY");
         authButton.setTextSize(12);authButton.setEnabled(false);
-        authButton.setOnClickListener(v->authenticateG3());
+        authButton.setOnClickListener(v->authenticateG3(false));
         root.addView(authButton);
+        emptyAuthButton=new Button(this);
+        emptyAuthButton.setAllCaps(false);
+        emptyAuthButton.setText("TEST ALTERNATE AUTH (NO PAIRING)");
+        emptyAuthButton.setTextSize(12);
+        emptyAuthButton.setEnabled(false);
+        emptyAuthButton.setOnClickListener(v->authenticateG3(true));
+        root.addView(emptyAuthButton);
+        root.addView(text("Diagnostic: after a fresh PROBE, try the existing key with a zero-payload AUTH. This sends no pairing, registration, firmware or setting changes.",12,muted,false));
         rideData=text("Battery, mileage and range appear here after successful authentication.",14,fg,false);
         rideData.setPadding(dp(12),dp(12),dp(12),dp(12));rideData.setBackgroundColor(panel);
         root.addView(rideData);
@@ -481,7 +489,8 @@ public final class MainActivity extends Activity {
         controlsReadReady=false;
         notifyReady=false;g3NotifyReady=false;nordicNotifyReady=false;
         recvBuffer.reset();subscriptions.clear();subscribing=false;
-        probeButton.setEnabled(false);authButton.setEnabled(false);readButton.setEnabled(false);
+        probeButton.setEnabled(false);authButton.setEnabled(false);
+        emptyAuthButton.setEnabled(false);readButton.setEnabled(false);
         setProtocolStatus("Connecting BLE; scooter authentication not started.");
         rideData.setText("No scooter telemetry yet.");
         details.setText("Device: "+name+"\nAddress: "+address+"\nConnecting…");
@@ -511,6 +520,7 @@ public final class MainActivity extends Activity {
         if(disconnectButton!=null) disconnectButton.setEnabled(false);
         if(probeButton!=null)probeButton.setEnabled(false);
         if(authButton!=null)authButton.setEnabled(false);
+        if(emptyAuthButton!=null)emptyAuthButton.setEnabled(false);
         if(readButton!=null)readButton.setEnabled(false);
         if(volumeButton!=null)volumeButton.setEnabled(false);
         if(autoOffButton!=null)autoOffButton.setEnabled(false);
@@ -536,7 +546,8 @@ public final class MainActivity extends Activity {
                 bmsChargeLimit=-1;pendingChargeLimit=-1;chargeControlLocked=false;
                 controlsReadReady=false;
                 runOnUiThread(() -> {
-                    probeButton.setEnabled(false);authButton.setEnabled(false);readButton.setEnabled(false);
+                    probeButton.setEnabled(false);authButton.setEnabled(false);
+                    emptyAuthButton.setEnabled(false);readButton.setEnabled(false);
                     volumeButton.setEnabled(false);autoOffButton.setEnabled(false);
                     regenButton.setEnabled(false);bmsButton.setEnabled(false);
                     chargeButton.setEnabled(false);
@@ -699,7 +710,7 @@ public final class MainActivity extends Activity {
         if(waitingCommand>=0 || probeActive)return;
         probeActive=true;probeAttempt=-1;
         g3Rx=0;nordicRx=0;
-        authButton.setEnabled(false);readButton.setEnabled(false);
+        authButton.setEnabled(false);emptyAuthButton.setEnabled(false);readButton.setEnabled(false);
         setProtocolStatus("Trying read-only PRE_COMM on available Bluetooth channels…");
         nextProbeAttempt();
     }
@@ -747,17 +758,23 @@ public final class MainActivity extends Activity {
             nextProbeAttempt();
         }
     }
-    private void authenticateG3() {
+    private void authenticateG3(boolean alternateEmptyPayload) {
         if(gatt==null||!protocol.hasChallenge()) {
             setProtocolStatus("PROBE must succeed before authentication");return;
         }
-        if(waitingCommand>=0)return;
+        if(waitingCommand>=0 || protocol.isAuthenticated())return;
         try {
             String key=pairingKey.getText().toString().trim();
-            // The key is NEVER sent to logs or stored in preferences.
-            byte[] frame=protocol.beginAuthentication(key);
+            byte[] frame=protocol.beginAuthentication(key,alternateEmptyPayload);
             pairingKey.setText("");
-            setProtocolStatus("Sending AUTH using existing key. No re-pairing will be attempted.");
+            authButton.setEnabled(false);
+            emptyAuthButton.setEnabled(false);
+            record(alternateEmptyPayload
+                ? "AUTH test: zero-byte payload with existing key (no pairing writes)"
+                : "AUTH test: 14-byte serial payload with existing key (no pairing writes)");
+            setProtocolStatus(alternateEmptyPayload
+                ? "Testing zero-payload AUTH with existing key. No pairing will be attempted."
+                : "Sending serial-payload AUTH with existing key. No re-pairing will be attempted.");
             send(frame,NinebotProbe.AUTH,0);
         }catch(Exception e){setProtocolStatus("Authentication not started: "+e.getMessage());}
     }
@@ -1224,6 +1241,7 @@ public final class MainActivity extends Activity {
                     ? ". Enter the EXISTING 16-byte key to authenticate, without re-pairing."
                     : ". No stored key was reported; this diagnostic build will NOT establish a new pairing."));
                 authButton.setEnabled(protocol.hasStoredPassword());
+                emptyAuthButton.setEnabled(protocol.hasStoredPassword());
             });
         } else if(r.command==NinebotProbe.AUTH) {
             protocol.onAuth(r);
@@ -1231,6 +1249,7 @@ public final class MainActivity extends Activity {
             setProtocolStatus("Scooter authenticated successfully — tap READ DATA for telemetry and settings.");
             runOnUiThread(()->{
                 readButton.setEnabled(true);
+                authButton.setEnabled(false);emptyAuthButton.setEnabled(false);
                 status.setText("Scooter authenticated ✓");
                 details.setText(details.getText().toString()
                     .replace("BLE GATT connected (not scooter login)", "BLE + scooter authenticated")

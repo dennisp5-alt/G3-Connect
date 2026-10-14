@@ -70,13 +70,23 @@ final class NinebotProbe {
         return crypto.encrypt(frame(BOARD_BLE,PRE_COMM,0,new byte[0]));
     }
     byte[] beginAuthentication(String passwordHex) throws GeneralSecurityException {
+        return beginAuthentication(passwordHex,false);
+    }
+    byte[] beginAuthentication(String passwordHex, boolean emptyAuthPayload)
+            throws GeneralSecurityException {
         if(authParameter==null) throw new GeneralSecurityException("Probe first");
         byte[] key=parseKey(passwordHex);
-        crypto.setKey(key,authParameter);
-        Arrays.fill(key,(byte)0);
-        // The vehicle's own serial must be exactly 14 bytes, right-padded.
-        byte[] serialBytes=Arrays.copyOf(serial.getBytes(StandardCharsets.US_ASCII),14);
-        return crypto.encrypt(frame(BOARD_BLE,AUTH,0,serialBytes));
+        try {
+            crypto.setKey(key,authParameter);
+        } finally {
+            Arrays.fill(key,(byte)0);
+        }
+        // Captured ScooterHacking traffic included a confirmed zero-payload AUTH
+        // with the exact same existing key on an earlier successful session.
+        // This is a diagnostic alternative, not a pairing/password change.
+        byte[] data=emptyAuthPayload?new byte[0]:
+            Arrays.copyOf(serial.getBytes(StandardCharsets.US_ASCII),14);
+        return crypto.encrypt(frame(BOARD_BLE,AUTH,0,data));
     }
     static byte[] parseKey(String hex) {
         if(hex==null || !hex.matches("(?i)[0-9a-f]{32}"))

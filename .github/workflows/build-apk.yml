@@ -35,18 +35,18 @@ jobs:
         run: gradle --no-daemon :app:assembleDebug
       - uses: actions/upload-artifact@v4
         with:
-          name: G3-Connect-v0.6.1-Diagnostic-APK
+          name: G3-Connect-v0.6.2-Diagnostic-APK
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
       - name: Publish direct APK download
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk G3Connect-v0.6.1.apk
-          if gh release view v0.6.1 >/dev/null 2>&1; then
-            gh release upload v0.6.1 G3Connect-v0.6.1.apk --clobber
+          cp app/build/outputs/apk/debug/app-debug.apk G3Connect-v0.6.2.apk
+          if gh release view v0.6.2 >/dev/null 2>&1; then
+            gh release upload v0.6.2 G3Connect-v0.6.2.apk --clobber
           else
-            gh release create v0.6.1 G3Connect-v0.6.1.apk --target "$GITHUB_SHA" \
-              --title "G3 Connect v0.6.1 - Verify charge limit despite missing BMS acknowledgement" \
-              --notes "Safe fix for G3 charging-limit writes: never retry a missing BMS ACK, verify actual BMS 0x82 by one readback. All other controls preserved."
+            gh release create v0.6.2 G3Connect-v0.6.2.apk --target "$GITHUB_SHA" \
+              --title "G3 Connect v0.6.2 - Alternate authentication handshake diagnostic" \
+              --notes "Separate one-shot zero-payload AUTH test from working 14-byte AUTH; no pairing writes, firmware changes, or saved keys. All v0.6.1 settings retained."
           fi

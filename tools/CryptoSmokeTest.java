@@ -57,6 +57,13 @@ public final class CryptoSmokeTest {
                 "Incorrect response command/payload on gen2="+gen2);
             probe.onPreComm(response);
             require(probe.hasStoredPassword(),"Stored-password bit was lost");
+            String dummy="00112233445566778899AABBCCDDEEFF";
+            byte[] normal=probe.beginAuthentication(dummy,false);
+            byte[] alternate=probe.beginAuthentication(dummy,true);
+            require(normal.length==27 && (normal[2]&255)==14,
+                "Serial-payload AUTH wire length must remain 27 bytes");
+            require(alternate.length==13 && (alternate[2]&255)==0,
+                "Empty-payload AUTH wire length must be 13 bytes");
             require(probe.getSerial().equals(NAME),"Serial could not be decoded correctly");
             NinebotProbe wrong=new NinebotProbe();
             wrong.setGeneration(gen2);
