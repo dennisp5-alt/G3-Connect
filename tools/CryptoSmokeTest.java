@@ -27,7 +27,11 @@ public final class CryptoSmokeTest {
         require(!NinebotProbe.allowedSettingWrite(0x70,3),"Unsupported regen level must be blocked");
         require(!NinebotProbe.allowedSettingWrite(0x42,5),"Kick-start modification must be blocked");
         require(!NinebotProbe.allowedSettingWrite(0x4A,8),"Unverified custom button blocked");
-        require(!NinebotProbe.allowedSettingWrite(0x82,85),"BMS modifications must be blocked");
+        require(!NinebotProbe.allowedSettingWrite(0x82,85),"VCU settings must not write BMS");
+        for(int limit:new int[]{80,85,90,95,100})
+            require(NinebotProbe.allowedChargeLimit(limit),"Expected supported charging limit "+limit);
+        for(int limit:new int[]{0,50,79,81,99,101,255})
+            require(!NinebotProbe.allowedChargeLimit(limit),"Invalid charging limit "+limit);
         NinebotProbe virgin=new NinebotProbe();
         boolean blocked=false;
         try {virgin.readBmsRegister(0x07,0x8C);}catch(java.security.GeneralSecurityException e){blocked=true;}

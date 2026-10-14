@@ -35,18 +35,18 @@ jobs:
         run: gradle --no-daemon :app:assembleDebug
       - uses: actions/upload-artifact@v4
         with:
-          name: G3-Connect-v0.5.0-Diagnostic-APK
+          name: G3-Connect-v0.6.0-Diagnostic-APK
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
       - name: Publish direct APK download
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk G3Connect-v0.5.0.apk
-          if gh release view v0.5.0 >/dev/null 2>&1; then
-            gh release upload v0.5.0 G3Connect-v0.5.0.apk --clobber
+          cp app/build/outputs/apk/debug/app-debug.apk G3Connect-v0.6.0.apk
+          if gh release view v0.6.0 >/dev/null 2>&1; then
+            gh release upload v0.6.0 G3Connect-v0.6.0.apk --clobber
           else
-            gh release create v0.5.0 G3Connect-v0.5.0.apk --target "$GITHUB_SHA" \
-              --title "G3 Connect v0.5.0 - Energy recovery control and BMS read-only probe" \
-              --notes "Authenticated G3 controls for energy recovery, volume and auto-off; read-only battery-controller/charge-limit discovery. No pairing changes or BMS writes."
+            gh release create v0.6.0 G3Connect-v0.6.0.apk --target "$GITHUB_SHA" \
+              --title "G3 Connect v0.6.0 - Charging-limit control and battery-health diagnostics" \
+              --notes "Existing-key authenticated G3 controls plus guarded charge limit with ACK and readback, BMS health/current/cell diagnostics. No firmware or pairing changes."
           fi

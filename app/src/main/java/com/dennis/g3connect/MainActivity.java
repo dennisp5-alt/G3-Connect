@@ -81,10 +81,12 @@ public final class MainActivity extends Activity {
     private final int[] readIndexes = {0x55,0x62,0x5F,0x6B,0x5A,0x70,0x42,0x49,0x76,0x4A};
     private final int[] readLengths = {2,4,2,2,2,2,2,2,2,2};
     private TextView rideData, settingsData;
-    private Button readButton, volumeButton, autoOffButton, regenButton, bmsButton;
+    private Button readButton, volumeButton, autoOffButton, regenButton, bmsButton, chargeButton;
     private TextView bmsData;
     private int currentRegen=-1;
     private int bmsPhase=0, bmsCandidate=0, bmsFoundBoard=-1;
+    private int bmsChargeLimit=-1, pendingChargeLimit=-1;
+    private boolean chargeControlLocked;
     private static final int[] BMS_CANDIDATES={0x07,0x22,0x23};
     private boolean controlsReadReady=false;
     private final Runnable operationTimeout = () -> {
@@ -106,10 +108,11 @@ public final class MainActivity extends Activity {
                     volumeButton.setEnabled(false);autoOffButton.setEnabled(false);
                     regenButton.setEnabled(false);readButton.setEnabled(true);
                     bmsButton.setEnabled(protocol.isAuthenticated());
+                    chargeButton.setEnabled(false);
                 });
                 return;
             }
-            if(failed==NinebotProbe.READ_RESP && bmsPhase!=0) {
+            if((failed==NinebotProbe.READ_RESP || failed==NinebotProbe.WRITE_RESP) && bmsPhase!=0) {
                 final int phase=bmsPhase;
                 record("BMS read timeout; candidate board="+
                        String.format(Locale.US,"0x%02X",BMS_CANDIDATES[Math.min(bmsCandidate,2)])+
@@ -117,8 +120,22 @@ public final class MainActivity extends Activity {
                 if(phase==1) {
                     bmsCandidate++;
                     handler.post(this::probeNextBms);
-                }else {
-                    finishBmsProbe("BMS found, but charge-limit register did not reply. No settings changed.");
+                }else if(phase>=2 && phase<=5) {
+                    record("BMS diagnostic phase "+phase+" unavailable, skipping");
+                    runOnUiThread(()->bmsData.append("\nBattery field "+phase+": unavailable"));
+                    bmsPhase=phase+1;
+                    handler.post(this::nextBmsDetail);
+                }else if(phase==6 || phase==7) {
+                    chargeControlLocked=true;bmsChargeLimit=-1;
+                    bmsPhase=0;
+                    record("Charge-limit WRITE or readback did not respond; result UNKNOWN. No retry.");
+                    setProtocolStatus("Charging-limit result UNKNOWN. Do not repeat. Check in another app.");
+                    runOnUiThread(()->{
+                        bmsData.append("\nCharging change unverified. Check using another app before continuing.");
+                        chargeButton.setEnabled(false);
+                        readButton.setEnabled(true);bmsButton.setEnabled(true);
+                        restoreVcuButtons();
+                    });
                 }
                 return;
             }
@@ -158,7 +175,7 @@ public final class MainActivity extends Activity {
         BluetoothManager manager = (BluetoothManager) getSystemService(BLUETOOTH_SERVICE);
         adapter = manager == null ? null : manager.getAdapter();
         buildUi();
-        record("G3 Connect v0.5.0 — diagnostic mode");
+        record("G3 Connect v0.6.0 — diagnostic mode");
         if (adapter == null) setStatus("Bluetooth unavailable");
         systemCheck();
     }
@@ -263,18 +280,23 @@ public final class MainActivity extends Activity {
         settingsData.setBackgroundColor(panel);
         settingsData.setTextIsSelectable(true);
         root.addView(settingsData);
-        TextView batteryTitle=text("CHARGING LIMIT — READ-ONLY DIAGNOSTIC",13,muted,true);
+        TextView batteryTitle=text("BATTERY & CHARGING — MAX G3",13,muted,true);
         LinearLayout.LayoutParams bp=new LinearLayout.LayoutParams(-1,-2);
         bp.topMargin=dp(18);root.addView(batteryTitle,bp);
-        bmsData=text("Tap BMS CHECK after authentication and READ DATA. The app will look for the battery controller and read its voltage and charge limit. No charging configuration will be changed.",13,muted,false);
+        bmsData=text("Tap BMS CHECK after authentication and READ DATA. The app will identify the battery controller, then read charge limit, battery health, current, and cell voltages. Charge changes require confirmation and readback.",13,muted,false);
         bmsData.setPadding(dp(12),dp(12),dp(12),dp(12));bmsData.setBackgroundColor(panel);
         root.addView(bmsData);
-        bmsButton=new Button(this);bmsButton.setText("BMS CHECK (READ ONLY)");
+        bmsButton=new Button(this);bmsButton.setText("BMS CHECK / BATTERY HEALTH");
         bmsButton.setAllCaps(false);bmsButton.setEnabled(false);
         bmsButton.setOnClickListener(v->startBmsProbe());
         root.addView(bmsButton);
+        chargeButton=new Button(this);
+        chargeButton.setText("SET CHARGING LIMIT");
+        chargeButton.setAllCaps(false);chargeButton.setEnabled(false);
+        chargeButton.setOnClickListener(v->chooseChargeLimit());
+        root.addView(chargeButton);
 
-        TextView caution=text("OPTIONAL CHANGES — PARK SCOOTER FIRST\nSound volume and auto power-off only. Every change requires confirmation and a verified readback. No motor, speed, braking, region, or pairing changes.",12,muted,false);
+        TextView caution=text("OPTIONAL CHANGES — PARK SCOOTER FIRST\nEvery change requires confirmation and authenticated readback. Charging-limit changes must be made unplugged and checked after reconnecting. No motor, speed, region, or pairing changes.",12,muted,false);
         caution.setPadding(dp(8),dp(12),dp(8),dp(6));
         root.addView(caution);
         LinearLayout controlRow=new LinearLayout(this);
@@ -453,7 +475,9 @@ public final class MainActivity extends Activity {
         probeActive=false;probeAttempt=-1;mtuSize=23;g3Rx=0;nordicRx=0;
         settingWritePending=false;verifyingSetting=false;
         currentVolume=-1;currentAutoOff=-1;currentRegen=-1;
-        bmsPhase=0;bmsCandidate=0;bmsFoundBoard=-1;controlsReadReady=false;
+        bmsPhase=0;bmsCandidate=0;bmsFoundBoard=-1;
+        bmsChargeLimit=-1;pendingChargeLimit=-1;chargeControlLocked=false;
+        controlsReadReady=false;
         notifyReady=false;g3NotifyReady=false;nordicNotifyReady=false;
         recvBuffer.reset();subscriptions.clear();subscribing=false;
         probeButton.setEnabled(false);authButton.setEnabled(false);readButton.setEnabled(false);
@@ -473,7 +497,8 @@ public final class MainActivity extends Activity {
         handler.removeCallbacks(operationTimeout);
         waitingCommand=-1;
         probeActive=false;
-        bmsPhase=0;bmsFoundBoard=-1;controlsReadReady=false;
+        bmsPhase=0;bmsFoundBoard=-1;bmsChargeLimit=-1;controlsReadReady=false;
+        chargeControlLocked=false;pendingChargeLimit=-1;
         settingWritePending=false;verifyingSetting=false;
         currentVolume=-1;currentAutoOff=-1;
         BluetoothGatt previous=gatt; gatt=null;
@@ -490,6 +515,7 @@ public final class MainActivity extends Activity {
         if(autoOffButton!=null)autoOffButton.setEnabled(false);
         if(regenButton!=null)regenButton.setEnabled(false);
         if(bmsButton!=null)bmsButton.setEnabled(false);
+        if(chargeButton!=null)chargeButton.setEnabled(false);
         setStatus("Disconnected");
     }
     private final BluetoothGattCallback callbacks = new BluetoothGattCallback() {
@@ -506,11 +532,13 @@ public final class MainActivity extends Activity {
                 probeActive=false;activeWrite=null;subscribing=false;
                 handler.removeCallbacks(operationTimeout);waitingCommand=-1;
                 settingWritePending=false;verifyingSetting=false;bmsPhase=0;
+                bmsChargeLimit=-1;pendingChargeLimit=-1;chargeControlLocked=false;
                 controlsReadReady=false;
                 runOnUiThread(() -> {
                     probeButton.setEnabled(false);authButton.setEnabled(false);readButton.setEnabled(false);
                     volumeButton.setEnabled(false);autoOffButton.setEnabled(false);
                     regenButton.setEnabled(false);bmsButton.setEnabled(false);
+                    chargeButton.setEnabled(false);
                     setProtocolStatus("Disconnected");
                 });
                 client.close(); return;
@@ -578,6 +606,15 @@ public final class MainActivity extends Activity {
                 BluetoothGattCharacteristic characteristic,int statusCode) {
             if(client!=gatt)return;
             if(statusCode!=BluetoothGatt.GATT_SUCCESS) {
+                if(bmsPhase==6 || bmsPhase==7) {
+                    chargeControlLocked=true;bmsPhase=0;bmsChargeLimit=-1;
+                    setProtocolStatus("Charge-limit transport rejected. Result UNKNOWN; no retry.");
+                    runOnUiThread(()->{
+                        chargeButton.setEnabled(false);readButton.setEnabled(true);
+                        bmsButton.setEnabled(true);restoreVcuButtons();
+                    });
+                    return;
+                }
                 if(settingWritePending) {
                     settingWritePending=false;verifyingSetting=false;
                     record("Settings transport write failed (GATT status="+statusCode+")");
@@ -828,11 +865,12 @@ public final class MainActivity extends Activity {
         if(!protocol.isAuthenticated() || !controlsReadReady || gatt==null ||
            waitingCommand>=0 || settingWritePending || bmsPhase!=0)return;
         bmsPhase=1;bmsCandidate=0;bmsFoundBoard=-1;
+        bmsChargeLimit=-1;chargeButton.setEnabled(false);
         bmsButton.setEnabled(false);
         volumeButton.setEnabled(false);autoOffButton.setEnabled(false);regenButton.setEnabled(false);
         readButton.setEnabled(false);
         bmsData.setText("Searching for BMS using READ requests only…");
-        setProtocolStatus("BMS read-only diagnostic in progress");
+        setProtocolStatus("Battery diagnostics in progress (read-only)");
         probeNextBms();
     }
     private void probeNextBms() {
@@ -852,58 +890,193 @@ public final class MainActivity extends Activity {
         }
     }
     private void handleBmsReply(NinebotProbe.Reply reply) {
-        if(reply.payload.length<2) {
-            record("BMS short reply, phase "+bmsPhase);
-            if(bmsPhase==1) {bmsCandidate++;handler.post(this::probeNextBms);}
-            else finishBmsProbe("BMS charge-limit reading too short; no change made.");
-            return;
-        }
-        long raw=NinebotProbe.unsignedLE(reply.payload);
-        if(bmsPhase==1) {
-            if(raw<3500 || raw>6500) {
-                record("BMS candidate voltage implausible, raw="+raw);
-                bmsCandidate++;
-                handler.post(this::probeNextBms);
+        final int phase=bmsPhase;
+        if(phase==0)return;
+        if(phase==7) {
+            if(reply.payload.length<2) {
+                failChargeReadback("Charge-limit reply too short; result unverified");
                 return;
             }
-            int board=BMS_CANDIDATES[bmsCandidate];
-            bmsFoundBoard=board;bmsPhase=2;
-            String line=String.format(Locale.US,"Battery pack board 0x%02X: %.2f V",board,raw/100.0);
-            record(line);
-            runOnUiThread(()->bmsData.setText(line+"\nReading charge limit…"));
-            try {
-                send(protocol.readBmsRegister(board,0x82),NinebotProbe.READ_RESP,0x82);
-            }catch(Exception e){
-                record("BMS limit read start error: "+e.getClass().getSimpleName());
-                finishBmsProbe("BMS voltage found but charge limit read could not begin.");
+            int observed=(int)NinebotProbe.unsignedLE(reply.payload);
+            if(observed==pendingChargeLimit && NinebotProbe.allowedChargeLimit(observed)) {
+                bmsChargeLimit=observed;pendingChargeLimit=-1;bmsPhase=0;
+                chargeControlLocked=false;
+                record("CHARGE LIMIT 0x82 VERIFIED by readback, value "+observed+"%");
+                setProtocolStatus("Charging limit VERIFIED: "+observed+"%. Confirm once more after reconnecting.");
+                runOnUiThread(()->{
+                    bmsData.append("\nCharging limit VERIFIED: "+observed+"%. Recheck after reconnect.");
+                    readButton.setEnabled(true);bmsButton.setEnabled(true);
+                    chargeButton.setEnabled(true);
+                    restoreVcuButtons();
+                });
+            }else{
+                failChargeReadback("Charging limit MISMATCH: requested "+
+                    pendingChargeLimit+"%, observed "+observed+"%");
             }
-        }else if(bmsPhase==2) {
-            final String line=((raw>=80 && raw<=100 && raw%5==0)?
-                "Charging limit: "+raw+"% (read-only)":
-                "Charging limit: unverified raw "+raw);
-            record("BMS "+line);
-            runOnUiThread(()->bmsData.append("\n"+line));
-            finishBmsProbe("BMS read complete. No charging setting changed.");
+            return;
+        }
+        if(phase==1) {
+            if(reply.payload.length<2) {
+                bmsCandidate++;handler.post(this::probeNextBms);return;
+            }
+            int raw=(int)NinebotProbe.unsignedLE(reply.payload);
+            if(raw<3500 || raw>6500) {
+                record("BMS candidate voltage implausible: "+raw);
+                bmsCandidate++;handler.post(this::probeNextBms);return;
+            }
+            bmsFoundBoard=BMS_CANDIDATES[bmsCandidate];
+            String line=String.format(Locale.US,"Battery board 0x%02X: %.2f V",bmsFoundBoard,raw/100.0);
+            record(line);
+            runOnUiThread(()->bmsData.setText(line));
+            bmsPhase=2;handler.postDelayed(this::nextBmsDetail,150);
+            return;
+        }
+        if(phase==2) {
+            if(reply.payload.length>=2){
+                int raw=(int)NinebotProbe.unsignedLE(reply.payload);
+                bmsChargeLimit=NinebotProbe.allowedChargeLimit(raw)?raw:-1;
+                appendBms("Charging limit: "+(bmsChargeLimit>=0?raw+"%":"unverified raw "+raw));
+            }else{
+                bmsChargeLimit=-1;appendBms("Charging limit: unavailable");
+            }
+        }else if(phase==3){
+            if(reply.payload.length>=4){
+                int health=reply.payload[3]&255;
+                appendBms("Battery state of health: "+(health>=1 && health<=100?health+"%":"unverified raw "+health));
+            }else appendBms("Battery state of health: unavailable");
+        }else if(phase==4){
+            if(reply.payload.length>=2){
+                int raw=(reply.payload[0]&255)|((reply.payload[1]&255)<<8);
+                short signed=(short)raw;
+                appendBms("Battery current: "+String.format(Locale.US,"%.2f A",signed/100.0));
+            }else appendBms("Battery current: unavailable");
+        }else if(phase==5){
+            if(reply.payload.length>=26) {
+                int min=9999,max=0;
+                for(int i=0;i<26;i+=2){
+                    int cell=(reply.payload[i]&255)|((reply.payload[i+1]&255)<<8);
+                    min=Math.min(min,cell);max=Math.max(max,cell);
+                }
+                if(min>=2800 && max<=4400 && max>=min) {
+                    appendBms(String.format(Locale.US,
+                        "Cell voltage range: %.3f–%.3f V; spread %d mV",
+                        min/1000.0,max/1000.0,max-min));
+                }else appendBms("Cell voltages: unverified raw range "+min+"–"+max);
+            }else appendBms("Cell voltage balance: unavailable (short reply)");
+        }
+        if(phase>=2 && phase<=5) {
+            bmsPhase=phase+1;
+            handler.postDelayed(this::nextBmsDetail,160);
         }
     }
-    private void finishBmsProbe(String message) {
+    private void appendBms(String line){
+        record("BMS "+line);
+        runOnUiThread(()->bmsData.append("\n"+line));
+    }
+    private void nextBmsDetail(){
+        if(bmsPhase<2 || bmsPhase>5)return;
+        int reg=bmsPhase==2?0x82:bmsPhase==3?0xF9:bmsPhase==4?0x8D:0xA0;
+        try{
+            send(protocol.readBmsRegister(bmsFoundBoard,reg),NinebotProbe.READ_RESP,reg);
+        }catch(Exception e){
+            appendBms("Register "+Integer.toHexString(reg)+" could not start");
+            bmsPhase++;
+            handler.postDelayed(this::nextBmsDetail,100);
+        }
+    }
+    private void restoreVcuButtons(){
+        volumeButton.setEnabled(controlsReadReady && NinebotProbe.allowedSettingWrite(0x76,currentVolume));
+        autoOffButton.setEnabled(controlsReadReady && NinebotProbe.allowedSettingWrite(0x49,currentAutoOff));
+        regenButton.setEnabled(controlsReadReady && NinebotProbe.allowedSettingWrite(0x70,currentRegen));
+    }
+    private void finishBmsProbe(String message){
         bmsPhase=0;
         record(message);
         setProtocolStatus(message);
         runOnUiThread(()->{
-            bmsButton.setEnabled(protocol.isAuthenticated());
             readButton.setEnabled(protocol.isAuthenticated());
-            volumeButton.setEnabled(controlsReadReady && NinebotProbe.allowedSettingWrite(0x76,currentVolume));
-            autoOffButton.setEnabled(controlsReadReady && NinebotProbe.allowedSettingWrite(0x49,currentAutoOff));
-            regenButton.setEnabled(controlsReadReady && NinebotProbe.allowedSettingWrite(0x70,currentRegen));
-            if(bmsFoundBoard<0 || !message.contains("read complete"))
+            bmsButton.setEnabled(protocol.isAuthenticated());
+            chargeButton.setEnabled(protocol.isAuthenticated() && controlsReadReady &&
+                !chargeControlLocked && bmsFoundBoard>=0 &&
+                NinebotProbe.allowedChargeLimit(bmsChargeLimit));
+            restoreVcuButtons();
+            if(bmsFoundBoard<0 || !message.startsWith("BMS diagnostics complete"))
                 bmsData.append("\n"+message);
+        });
+    }
+    private void chooseChargeLimit(){
+        if(!protocol.isAuthenticated() || !controlsReadReady || bmsFoundBoard<0
+            || !NinebotProbe.allowedChargeLimit(bmsChargeLimit) || chargeControlLocked
+            || waitingCommand>=0 || bmsPhase!=0 || settingWritePending || gatt==null){
+            setProtocolStatus("Read and verify battery controller before adjusting charge limit");
+            return;
+        }
+        final int oldValue=bmsChargeLimit;
+        final int[] values={80,85,90,95,100};
+        final String[] options={"80%","85%","90%","95%","100%"};
+        new AlertDialog.Builder(this).setTitle("Charging limit — currently "+oldValue+"%")
+            .setItems(options,(dialog,chosen)->{
+                final int next=values[chosen];
+                if(next==oldValue){setProtocolStatus("Charging limit already "+next+"%");return;}
+                new AlertDialog.Builder(this)
+                    .setTitle("Confirm charging limit")
+                    .setMessage("With the scooter PARKED and CHARGER UNPLUGGED, change charging limit "+
+                        oldValue+"% → "+next+"%?\n\nOne write will be sent to the verified BMS controller. "+
+                        "The app will wait for a scooter acknowledgement and check its readback. "+
+                        "If unverified, DO NOT REPEAT. Confirm the result separately.")
+                    .setNegativeButton("Cancel",null)
+                    .setPositiveButton("APPLY",(d,w)->applyChargeLimit(next))
+                    .show();
+            }).setNegativeButton("Cancel",null).show();
+    }
+    private void applyChargeLimit(int next){
+        if(!protocol.isAuthenticated() || !controlsReadReady || bmsFoundBoard<0 ||
+           !NinebotProbe.allowedChargeLimit(bmsChargeLimit) || chargeControlLocked ||
+           !NinebotProbe.allowedChargeLimit(next) || waitingCommand>=0 || bmsPhase!=0 ||
+           settingWritePending || gatt==null)return;
+        try{
+            byte[] cmd=protocol.writeChargeLimit(bmsFoundBoard,next);
+            bmsPhase=6;pendingChargeLimit=next;
+            bmsButton.setEnabled(false);chargeButton.setEnabled(false);
+            readButton.setEnabled(false);
+            volumeButton.setEnabled(false);autoOffButton.setEnabled(false);regenButton.setEnabled(false);
+            record("BMS 0x82 one-shot write requested from "+bmsChargeLimit+"% to "+next+
+                "% on confirmed board 0x"+Integer.toHexString(bmsFoundBoard));
+            setProtocolStatus("Charging-limit write sent. Awaiting ACK and readback...");
+            send(cmd,NinebotProbe.WRITE_RESP,0x82);
+        }catch(Exception e){
+            chargeControlLocked=true;bmsPhase=0;
+            setProtocolStatus("Charge change could not begin; no retry");
+            runOnUiThread(()->{
+                bmsButton.setEnabled(true);readButton.setEnabled(true);
+                chargeButton.setEnabled(false);restoreVcuButtons();
+            });
+        }
+    }
+    private void verifyChargeLimit(){
+        if(bmsPhase!=7 || gatt==null)return;
+        try{
+            send(protocol.readBmsRegister(bmsFoundBoard,0x82),NinebotProbe.READ_RESP,0x82);
+        }catch(Exception e){
+            failChargeReadback("Charge-limit readback could not start: result unknown");
+        }
+    }
+    private void failChargeReadback(String problem){
+        record(problem);
+        chargeControlLocked=true;bmsChargeLimit=-1;pendingChargeLimit=-1;bmsPhase=0;
+        setProtocolStatus(problem+". Do not repeat the write.");
+        runOnUiThread(()->{
+            bmsData.append("\n"+problem);
+            chargeButton.setEnabled(false);
+            bmsButton.setEnabled(true);readButton.setEnabled(true);
+            restoreVcuButtons();
         });
     }
     private void readG3() {
         if(!protocol.isAuthenticated()){setProtocolStatus("Authenticate first");return;}
         if(waitingCommand>=0 || settingWritePending || bmsPhase!=0)return;
         controlsReadReady=false;
+        chargeButton.setEnabled(false);
         volumeButton.setEnabled(false);autoOffButton.setEnabled(false);regenButton.setEnabled(false);
         readStep=0;
         rideData.setText("Reading scooter telemetry…");
@@ -1046,6 +1219,11 @@ public final class MainActivity extends Activity {
                     .replace("BLE GATT connected (not scooter login)", "BLE + scooter authenticated")
                     .replace("Scooter authentication: NOT STARTED", "Scooter authentication: VERIFIED"));
             });
+        } else if(r.command==NinebotProbe.WRITE_RESP && bmsPhase==6){
+            record("BMS charge-limit write ACK received; scheduling readback");
+            bmsPhase=7;
+            handler.postDelayed(this::verifyChargeLimit,350);
+            return;
         } else if(r.command==NinebotProbe.READ_RESP) {
             if(verifyingSetting) {
                 verifyingSetting=false;

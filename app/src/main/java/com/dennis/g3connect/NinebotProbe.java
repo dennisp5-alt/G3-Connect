@@ -97,13 +97,28 @@ final class NinebotProbe {
         }else throw new GeneralSecurityException("Register not on read-only allowlist");
         return crypto.encrypt(frame(BOARD_VCU,READ,register,new byte[]{(byte)length}));
     }
+    static final int WRITE_RESP=0x05, WRITE_ACK=0x02;
     byte[] readBmsRegister(int board,int register) throws GeneralSecurityException {
         if(!authenticated)throw new GeneralSecurityException("Not authenticated");
         if(board!=0x07 && board!=0x22 && board!=0x23)
             throw new GeneralSecurityException("Unsupported BMS candidate board");
-        if(register!=0x8C && register!=0x82)
-            throw new GeneralSecurityException("BMS register not in read-only allowlist");
-        return crypto.encrypt(frame(board,READ,register,new byte[]{2}));
+        int length=register==0xF9?4:register==0xA0?26:2;
+        if(register!=0x8C && register!=0x82 && register!=0xF9
+            && register!=0x8D && register!=0xA0)
+            throw new GeneralSecurityException("BMS register not on read-only allowlist");
+        return crypto.encrypt(frame(board,READ,register,new byte[]{(byte)length}));
+    }
+    static boolean allowedChargeLimit(int value){
+        return value>=80 && value<=100 && value%5==0;
+    }
+    byte[] writeChargeLimit(int board,int value) throws GeneralSecurityException {
+        if(!authenticated)throw new GeneralSecurityException("Not authenticated");
+        if(board!=0x07 && board!=0x22 && board!=0x23)
+            throw new GeneralSecurityException("Unverified battery board");
+        if(!allowedChargeLimit(value))
+            throw new GeneralSecurityException("Charge limit outside 80–100% in 5% steps");
+        // BMS writes use 0x02 and must respond with 0x05 before readback.
+        return crypto.encrypt(frame(board,WRITE_ACK,0x82,new byte[]{(byte)value,0}));
     }
     static boolean allowedSettingWrite(int register,int value) {
         // Confirmed VCU control indexes: energy recovery, auto-off and sound.
