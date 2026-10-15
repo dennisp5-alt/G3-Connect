@@ -82,10 +82,21 @@ public class MainActivity extends Activity {
         scroll.addView(body);setContentView(scroll);
         body.addView(text("DENNIS  /  STEM STUDIO",12,AQUA,true));gap(body,10);
         heading=text("Hear every layer.",29,FG,true);body.addView(heading);
-        body.addView(text("Offline · Quality-first · 2-stem engine test",13,MUTE,false));gap(body,25);
+        body.addView(text("Offline · Two-stem and four-stem separation",13,MUTE,false));gap(body,15);
+        LinearLayout selector=panel(body);
+        selector.addView(text("CHOOSE YOUR SEPARATION MODE",16,FG,true));
+        gap(selector,11);
+        Button openFour=button("4 STEMS · Vocals / Drums / Bass / Other");
+        selector.addView(openFour);
+        openFour.setOnClickListener(v->startActivity(new Intent(this,FourStemActivity.class)));
+        selector.addView(text("Four-stem experimental mode · automatic 10-second test from any WAV",12,MUTE,false));
+        gap(selector,8);
+        selector.addView(text("2 STEMS · Vocals / Instrumental",15,FG,true));
+        selector.addView(text("The original two-stem controls are below.",12,MUTE,false));
+        gap(body,20);
 
         LinearLayout p=panel(body);
-        p.addView(text("01   Separation model",15,FG,true));gap(p,6);
+        p.addView(text("01   2-STEM · Separation model",15,FG,true));gap(p,6);
         modelText=text("",13,MUTE,false);p.addView(modelText);gap(p,13);
         importModel=button("Install local UVR model (.onnx)");p.addView(importModel);
         importModel.setOnClickListener(v->picker(PICK_MODEL,"*/*"));
@@ -120,11 +131,8 @@ public class MainActivity extends Activity {
             i.putExtra(Intent.EXTRA_TITLE,label+"_Stems_48kHz_24bit.zip");
             startActivityForResult(i,PICK_STEM_ZIP);
         });
-        gap(body,18);
-        Button fourStem=button("Experimental · 4-stem mode");body.addView(fourStem);
-        fourStem.setOnClickListener(v->startActivity(new Intent(this,FourStemActivity.class)));
-        gap(body,12);
-        body.addView(text("TEST BUILD · Validate separation quality and device performance before expanding to four stems.",11,MUTE,false));
+        gap(body,16);
+        body.addView(text("FOUR-STEM LAB v0.1.3 · Select the four-stem option at the top. Its model and audio imports are separate from this trusted two-stem screen.",11,MUTE,false));
         refresh();
     }
     private void refresh(){
