@@ -20,3 +20,7 @@ mkdir -p app/src/main/cpp/sherpa-onnx/c-api
 curl -fL --retry 3 "https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/v${VERSION}/sherpa-onnx/c-api/c-api.h" \
   -o app/src/main/cpp/sherpa-onnx/c-api/c-api.h
 printf 'Native libraries and header ready for v%s\n' "$VERSION"
+
+# Experimental four-stem backend requires ONNX Runtime C API header.
+curl -fL --retry 3 "https://raw.githubusercontent.com/microsoft/onnxruntime/v1.18.1/include/onnxruntime/core/session/onnxruntime_c_api.h" \
+  -o app/src/main/cpp/onnxruntime_c_api.h

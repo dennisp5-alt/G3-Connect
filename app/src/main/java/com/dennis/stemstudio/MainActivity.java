@@ -121,6 +121,9 @@ public class MainActivity extends Activity {
             startActivityForResult(i,PICK_STEM_ZIP);
         });
         gap(body,18);
+        Button fourStem=button("Experimental · 4-stem mode");body.addView(fourStem);
+        fourStem.setOnClickListener(v->startActivity(new Intent(this,FourStemActivity.class)));
+        gap(body,12);
         body.addView(text("TEST BUILD · Validate separation quality and device performance before expanding to four stems.",11,MUTE,false));
         refresh();
     }

@@ -7,6 +7,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <climits>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -274,8 +275,8 @@ std::array<std::string,5> separate(JNIEnv*env,const std::string&model,const std:
     ortCheck(api->CreateTensorWithDataAsOrtValue(sess.memory,audio.data(),audio.size()*sizeof(float),
         inDims,3,ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,&tensor));
     try{
-      ortCheck(api->Run(sess.session,nullptr,inNames,const_cast<const OrtValue* const*>(&tensor),1,
-                        outNames,1,&prediction));
+      const OrtValue *inputs[]{tensor};
+      ortCheck(api->Run(sess.session,nullptr,inNames,inputs,1,outNames,1,&prediction));
       OrtTensorTypeAndShapeInfo*shape=nullptr;
       ortCheck(api->GetTensorTypeAndShape(prediction,&shape));
       size_t rank=0;ortCheck(api->GetDimensionsCount(shape,&rank));
