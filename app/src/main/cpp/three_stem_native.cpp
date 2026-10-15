@@ -245,60 +245,205 @@ void writeThreeStem24(const std::string&path,const SherpaOnnxSourceSeparationOut
   }
   if(fflush(f)!=0||ferror(f))throw std::runtime_error("WAV export failed");
 }
+
+constexpr size_t CHUNK_SECONDS=18, PAD_SECONDS=1, BLEND48=4800;
+struct Scratch {
+  std::array<std::string,3> raw{},partial{},finals{};
+  std::array<FILE*,3> fp{};
+  std::array<std::vector<float>,3> tail{};
+  size_t pending=0,written=0;
+  double peak=0;
+  Scratch(const std::string&folder,const std::string&prefix){
+    const char*names[]{"Vocals","Drums","Other"};
+    for(int i=0;i<3;i++){
+      raw[i]=folder+"/"+prefix+"_"+names[i]+".floatpart";
+      finals[i]=folder+"/"+prefix+"_"+names[i]+"_24bit.wav";
+      partial[i]=finals[i]+".partial";
+      fp[i]=fopen(raw[i].c_str(),"wb");
+      if(!fp[i])throw std::runtime_error("Cannot create temporary stem");
+    }
+  }
+  ~Scratch(){
+    for(auto&f:fp)if(f){fclose(f);f=nullptr;}
+    for(auto&p:raw)if(!p.empty())std::remove(p.c_str());
+    for(auto&p:partial)if(!p.empty())std::remove(p.c_str());
+  }
+  void append(const std::array<std::vector<float>,3>&v,size_t begin,size_t count){
+    for(int i=0;i<3;i++){
+      if(v[i].size()<2*(begin+count))throw std::runtime_error("Bad stem buffer");
+      const float*data=v[i].data()+2*begin;
+      for(size_t j=0;j<2*count;j++){
+        if(!std::isfinite(data[j]))throw std::runtime_error("Invalid stem sample");
+        peak=std::max(peak,std::abs(double(data[j])));
+      }
+      if(fwrite(data,sizeof(float),2*count,fp[i])!=2*count)
+        throw std::runtime_error("Scratch storage full");
+    }
+    written+=count;
+  }
+  void saveTail(const std::array<std::vector<float>,3>&v,size_t count){
+    pending=count;
+    for(int i=0;i<3;i++)
+      tail[i].assign(v[i].end()-2*count,v[i].end());
+  }
+  void join(const std::array<std::vector<float>,3>&left){
+    if(!pending)return;
+    std::array<std::vector<float>,3> joined;
+    for(int s=0;s<3;s++){
+      joined[s].resize(pending*2);
+      for(size_t i=0;i<pending;i++){
+        const double t=(i+0.5)/double(pending);
+        for(int c=0;c<2;c++)
+          joined[s][2*i+c]=float((1-t)*tail[s][2*i+c]+t*left[s][2*i+c]);
+      }
+    }
+    append(joined,0,pending);
+    pending=0;
+  }
+  void finishScratch(){
+    if(pending){
+      std::array<std::vector<float>,3> end=tail;
+      append(end,0,pending);
+      pending=0;
+    }
+    for(auto&f:fp)if(f){
+      if(fflush(f)!=0||ferror(f))throw std::runtime_error("Stem scratch flush failed");
+      if(fclose(f)!=0)throw std::runtime_error("Stem scratch close failed");
+      f=nullptr;
+    }
+  }
+};
+std::array<std::vector<float>,3> render(const SherpaOnnxSourceSeparationOutput*voice,
+     const SherpaOnnxSourceSeparationOutput*drum,size_t local48,size_t frames){
+  std::array<std::vector<float>,3> result;
+  for(auto&v:result)v.resize(frames*2);
+  for(size_t i=0;i<frames;i++){
+    if((i&65535)==0)checkCancel();
+    for(int c=0;c<2;c++){
+      const double vocal=outputSample(voice,drum,0,c,uint32_t(local48+i));
+      const double drums=outputSample(voice,drum,1,c,uint32_t(local48+i));
+      const double other=outputSample(voice,drum,2,c,uint32_t(local48+i));
+      const double x[]{vocal,drums,other};
+      for(int s=0;s<3;s++){
+        if(!std::isfinite(x[s]))throw std::runtime_error("Nonfinite separated sample");
+        result[s][2*i+c]=float(x[s]);
+      }
+    }
+  }
+  return result;
+}
+void writeHeader(FILE*f,size_t frames){
+  const uint64_t bytes=uint64_t(frames)*6;
+  if(bytes>0xffffff00ULL)throw std::runtime_error("WAV exceeds classic RIFF maximum");
+  if(fwrite("RIFF",1,4,f)!=4)throw std::runtime_error("WAV header failure");
+  write32(f,uint32_t(36+bytes));
+  if(fwrite("WAVEfmt ",1,8,f)!=8)throw std::runtime_error("WAV header failure");
+  write32(f,16);write16(f,1);write16(f,2);
+  write32(f,48000);write32(f,288000);write16(f,6);write16(f,24);
+  if(fwrite("data",1,4,f)!=4)throw std::runtime_error("WAV header failure");
+  write32(f,uint32_t(bytes));
+}
 std::array<std::string,4> extract(JNIEnv*env,
   const std::string&vocalModel,const std::string&drumModel,const std::string&wav,
-  const std::string&folder,const std::string&prefix,int start,jobject callback){
-  if(busy.exchange(true))throw std::runtime_error("Three-stem separation already running");
-  struct Clear {~Clear(){busy.store(false);}} clear;
-  progress(env,callback,0);
-  Audio wavSamples=loadWav(wav,start,10);
-  OutputPtr first=runModel(vocalModel,int(wavSamples.rate),int(wavSamples.frames),
-     wavSamples.planes[0].data(),wavSamples.planes[1].data());
-  // Release original input so it does not overlap the second model's peak memory.
-  std::vector<std::vector<float>>().swap(wavSamples.planes);
-  validateOutput(first.get(),"Vocals");
-  progress(env,callback,1);
-  const auto& inst=first->stems[1];
-  OutputPtr second=runModel(drumModel,first->sample_rate,inst.n,
-                           inst.samples[0],inst.samples[1]);
-  validateOutput(second.get(),"Drums");
-  if(first->sample_rate!=second->sample_rate ||
-     first->stems[0].n!=second->stems[0].n)
-      throw std::runtime_error("Two models returned incompatible frame alignment");
-  progress(env,callback,2);
-  const uint32_t frames=first->sample_rate==44100?
-     resampler48().outputFrames(first->stems[0].n):uint32_t(first->stems[0].n);
-  double peak=0;
-  // Scan actual resampled 48k samples and use exactly one attenuation
-  // for vocals, drums and other. Never normalize separately.
-  for(int role=0;role<3;role++)
-    for(uint32_t frame=0;frame<frames;frame++)
-      for(int ch=0;ch<2;ch++){
-        double value=outputSample(first.get(),second.get(),role,ch,frame);
-        if(!std::isfinite(value))throw std::runtime_error("Non-finite output sample");
-        peak=std::max(peak,std::abs(value));
+  const std::string&folder,const std::string&prefix,int start,
+  int duration,jobject callback){
+  if(busy.exchange(true))throw std::runtime_error("Already separating three stems");
+  struct Guard{~Guard(){busy.store(false);cancelled.store(false);}}guard;
+  cancelled.store(false);
+  if(start<0||start>720||(duration!=0&&duration!=10&&duration!=60))
+    throw std::runtime_error("Unsupported preview duration/position");
+  Audio info=loadWav(wav,0,0);
+  const size_t rate=info.rate,total=info.totalFrames;
+  const size_t preview=size_t(duration)*rate;
+  const size_t offset=duration==0?0:std::min(size_t(start)*rate,
+                                            total>preview?total-preview:0);
+  const size_t selected=duration==0?total:std::min(preview,total-offset);
+  const size_t outFrames=(uint64_t(selected)*48000+rate/2)/rate;
+  if(outFrames==0)throw std::runtime_error("No audio to separate");
+  struct statvfs fs{};
+  if(statvfs(folder.c_str(),&fs)!=0)throw std::runtime_error("Cannot check free space");
+  const uint64_t needed=uint64_t(outFrames)*42+100'000'000;
+  if(uint64_t(fs.f_bavail)*fs.f_frsize<needed)
+    throw std::runtime_error("Storage low: need "+std::to_string((needed+999999)/1000000)+
+                             " MB free for temporary and 24-bit stems");
+  const size_t core=CHUNK_SECONDS*rate;
+  const int count=int((selected+core-1)/core);
+  Scratch writer(folder,prefix);
+  for(int idx=0;idx<count;idx++){
+    checkCancel();
+    const size_t from=size_t(idx)*core,to=std::min(selected,from+core);
+    const size_t padFrom=from>PAD_SECONDS*rate?from-PAD_SECONDS*rate:0;
+    const size_t padTo=std::min(selected,to+PAD_SECONDS*rate);
+    progress(env,callback,0,idx,count);
+    Audio input=loadWav(wav,offset+padFrom,padTo-padFrom);
+    OutputPtr vox=runModel(vocalModel,int(input.rate),int(input.frames),
+                           input.planes[0].data(),input.planes[1].data());
+    input.planes.clear();
+    progress(env,callback,1,idx,count);
+    const auto&instrumental=vox->stems[1];
+    OutputPtr drums=runModel(drumModel,vox->sample_rate,instrumental.n,
+                           instrumental.samples[0],instrumental.samples[1]);
+    validateOutput(vox.get(),"Vocal inference");
+    validateOutput(drums.get(),"Drum inference");
+    if(vox->sample_rate!=drums->sample_rate||vox->stems[0].n!=drums->stems[0].n)
+      throw std::runtime_error("Second-pass drum sample alignment mismatch");
+    progress(env,callback,2,idx,count);
+    const size_t from48=(uint64_t(from)*48000+rate/2)/rate;
+    const size_t to48=(uint64_t(to)*48000+rate/2)/rate;
+    const size_t padded48=(uint64_t(padFrom)*48000+rate/2)/rate;
+    const size_t coreLocal=from48-padded48;
+    if(writer.pending){
+      if(coreLocal<writer.pending)
+        throw std::runtime_error("Insufficient left-context samples");
+      auto left=render(vox.get(),drums.get(),coreLocal-writer.pending,writer.pending);
+      writer.join(left);
+    }
+    const size_t frames=to48-from48;
+    const size_t hold=idx+1<count?std::min(BLEND48,frames):0;
+    auto current=render(vox.get(),drums.get(),coreLocal,frames);
+    writer.append(current,0,frames-hold);
+    if(hold)writer.saveTail(current,hold);
+  }
+  writer.finishScratch();
+  if(writer.written!=outFrames)throw std::runtime_error("Assembled WAV frame count mismatch");
+  const double gain=writer.peak>0.9999?0.9999/writer.peak:1.;
+  for(int st=0;st<3;st++){
+    checkCancel();
+    progress(env,callback,3,st,count);
+    FileHandle in(writer.raw[st],"rb");
+    FileHandle out(writer.partial[st],"wb");
+    writeHeader(out.get(),outFrames);
+    std::vector<float> block(16384);
+    std::vector<uint8_t> pcm(16384*3);
+    size_t done=0;
+    while(done<outFrames){
+      checkCancel();
+      const size_t n=std::min(size_t(8192),outFrames-done);
+      if(fread(block.data(),sizeof(float),2*n,in.get())!=2*n)
+        throw std::runtime_error("Scratch stem is incomplete");
+      for(size_t i=0;i<2*n;i++){
+        const double x=std::max(-1.,std::min(0.99999988079,double(block[i])*gain));
+        const int32_t val=int32_t(std::llrint(x*8388608.));
+        pcm[3*i]=uint8_t(val);pcm[3*i+1]=uint8_t(val>>8);pcm[3*i+2]=uint8_t(val>>16);
       }
-  const float gain=peak>0.9999?float(0.9999/peak):1.f;
-  std::array<std::string,4> results{};
-  static const char*names[]{"Vocals","Drums","Other"};
-  std::array<std::string,3> pending{};
-  try{
-    for(int role=0;role<3;role++){
-      results[role]=folder+"/"+prefix+"_"+names[role]+"_24bit.wav";
-      pending[role]=results[role]+".partial";
-      writeThreeStem24(pending[role],first.get(),second.get(),role,gain,frames);
+      if(fwrite(pcm.data(),1,6*n,out.get())!=6*n)
+        throw std::runtime_error("24-bit WAV disk write error");
+      done+=n;
     }
-    for(int role=0;role<3;role++){
-      if(std::rename(pending[role].c_str(),results[role].c_str())!=0)
-        throw std::runtime_error("Cannot finalize "+results[role]);
-      pending[role].clear();
-    }
-  }catch(...){for(auto &p:pending)if(!p.empty())std::remove(p.c_str());throw;}
-  progress(env,callback,3);
-  results[3]="3-stem preview · "+std::to_string(frames)+
-       " aligned stereo 48kHz frames · common gain "+
-       std::to_string(20.0*std::log10(gain))+" dB";
-  return results;
+    if(fflush(out.get())!=0||ferror(out.get()))throw std::runtime_error("WAV flush error");
+  }
+  for(int st=0;st<3;st++){
+    if(std::rename(writer.partial[st].c_str(),writer.finals[st].c_str())!=0)
+      throw std::runtime_error("Cannot finalize stem WAV");
+    writer.partial[st].clear();
+  }
+  progress(env,callback,4,count,count);
+  std::array<std::string,4> result{};
+  for(int st=0;st<3;st++)result[st]=writer.finals[st];
+  result[3]=std::string(duration==0?"Full song":duration==60?"60s test":"10s test")+
+     " · "+std::to_string(count)+" sections · shared gain "+
+     std::to_string(20*std::log10(gain))+" dB";
+  return result;
 }
 
 std::string jstr(JNIEnv* env,jstring s) {
