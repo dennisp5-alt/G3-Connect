@@ -54,7 +54,7 @@ struct Audio{
   size_t frames=0;
   std::array<std::vector<float>,2> chan;
 };
-Audio readWav(const std::string&path){
+Audio readWav(const std::string&path,int previewSeconds){
   auto f=fileOpen(path,"rb");
   uint8_t hdr[12];require(fread(hdr,1,12,f.get())==12 && !memcmp(hdr,"RIFF",4) &&
     !memcmp(hdr+8,"WAVE",4),"Four-stem mode accepts RIFF/WAV only");
@@ -77,7 +77,8 @@ Audio readWav(const std::string&path){
   require((fmt==1 && (bits==16 || bits==24 || bits==32)) || (fmt==3 && bits==32),
       "Input must be PCM 16/24/32 or floating-point 32-bit WAV");
   require(align==nch*(bits/8) && (bytes%align)==0,"Invalid WAV block alignment");
-  const size_t frames=bytes/align;
+  const size_t wholeFrames=bytes/align;
+  const size_t frames=previewSeconds>0 ? std::min(wholeFrames,size_t(rate)*size_t(previewSeconds)) : wholeFrames;
   require(frames>=1 && frames<=size_t(rate)*12*60,"Song must be <=12 minutes");
   require(fseek(f.get(),at,SEEK_SET)==0,"Cannot seek to samples");
   Audio audio;audio.rate=rate;audio.frames=frames;
@@ -217,9 +218,10 @@ struct RunningGuard{RunningGuard(){require(!inProgress.exchange(true),"Four-stem
   ~RunningGuard(){inProgress.store(false);cancelled.store(false);}};
 
 std::array<std::string,5> separate(JNIEnv*env,const std::string&model,const std::string&wav,
-                const std::string&folder,const std::string&prefix,jobject listener){
+                const std::string&folder,const std::string&prefix,int previewSeconds,jobject listener){
   RunningGuard running;
-  auto input=readWav(wav);
+  require(previewSeconds==0 || (previewSeconds>=1 && previewSeconds<=30),"Preview duration must be 1-30 seconds");
+  auto input=readWav(wav,previewSeconds);
   const size_t sourceFrames=input.frames;
   // 48k input must be resampled BEFORE inference; HT-Demucs consumes 44.1k.
   if(input.rate==48000){
@@ -237,9 +239,13 @@ std::array<std::string,5> separate(JNIEnv*env,const std::string&model,const std:
   OrtSessionHolder sess;
   ortCheck(api->CreateEnv(ORT_LOGGING_LEVEL_WARNING,"DennisFourStem",&sess.env));
   ortCheck(api->CreateSessionOptions(&sess.opts));
-  ortCheck(api->SetIntraOpNumThreads(sess.opts,2));
+  ortCheck(api->SetIntraOpNumThreads(sess.opts,1));
+  // Reduce retained arena allocations and avoid pattern caches on RAM-constrained phones.
+  ortCheck(api->DisableCpuMemArena(sess.opts));
+  ortCheck(api->DisableMemPattern(sess.opts));
   ortCheck(api->SetInterOpNumThreads(sess.opts,1));
   ortCheck(api->SetSessionGraphOptimizationLevel(sess.opts,ORT_ENABLE_ALL));
+  progress(env,listener,0,int(nchunks));
   ortCheck(api->CreateSession(sess.env,model.c_str(),sess.opts,&sess.session));
   size_t ni=0,no=0;
   ortCheck(api->SessionGetInputCount(sess.session,&ni));
@@ -347,7 +353,7 @@ std::array<std::string,5> separate(JNIEnv*env,const std::string&model,const std:
       result[s]=path;
     }
   }catch(...){for(const auto&p:toDelete)std::remove(p.c_str());throw;}
-  result[4]="4 stems · stereo 48 kHz / 24-bit · "+std::to_string(nchunks)+
+  result[4]=std::string(previewSeconds>0?"Short-test complete · ":"Full-song complete · ")+"4 stems · stereo 48 kHz / 24-bit · "+std::to_string(nchunks)+
        " chunks · common gain "+std::to_string(20*std::log10(sharedGain))+" dB";
   return result;
 }
@@ -358,10 +364,10 @@ Java_com_dennis_stemstudio_FourStemNative_cancel(JNIEnv*,jclass){cancelled.store
 
 extern "C" JNIEXPORT jobjectArray JNICALL
 Java_com_dennis_stemstudio_FourStemNative_separate(JNIEnv*env,jclass,jstring model,jstring wav,
-                   jstring folder,jstring prefix,jobject progressListener){
+                   jstring folder,jstring prefix,jint previewSeconds,jobject progressListener){
   try{
     auto results=separate(env,jstr(env,model),jstr(env,wav),jstr(env,folder),
-                          jstr(env,prefix),progressListener);
+                          jstr(env,prefix),int(previewSeconds),progressListener);
     jclass cls=env->FindClass("java/lang/String");
     if(!cls)return nullptr;
     jobjectArray array=env->NewObjectArray(5,cls,nullptr);

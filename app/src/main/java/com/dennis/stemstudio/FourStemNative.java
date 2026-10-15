@@ -8,7 +8,7 @@ final class FourStemNative {
     }
     interface Progress { void onProgress(int completedChunks, int totalChunks); }
     static native String[] separate(String model, String inputWav, String outputDirectory,
-                                    String prefix, Progress listener);
+                                    String prefix, int previewSeconds, Progress listener);
     static native void cancel();
     private FourStemNative() { }
 }

@@ -1,6 +1,8 @@
 package com.dennis.stemstudio;
 
 import android.app.Activity;
+import android.content.SharedPreferences;
+import android.os.Debug;
 import android.content.ContentResolver;
 import android.content.Intent;
 import android.database.Cursor;
@@ -37,6 +39,7 @@ import java.util.zip.ZipOutputStream;
 
 /** Experimental four-stem screen; original two-stem screen and native code unchanged. */
 public final class FourStemActivity extends Activity {
+    private static final String PREF="fourstem-lab-crash-checkpoint";
     private static final int PICK_MODEL=101,PICK_AUDIO=102,PICK_ZIP=103,PICK_FOLDER=104;
     private static final int BG=Color.rgb(14,18,24),PANEL=Color.rgb(27,34,43);
     private static final int FG=Color.rgb(242,247,250),MUTE=Color.rgb(154,168,183);
@@ -59,6 +62,9 @@ public final class FourStemActivity extends Activity {
         model=new File(new File(getFilesDir(),"models"),"htdemucs-4stem.onnx");
         if(!model.isFile() || model.length()<100_000_000L)model=null;
         showScreen();
+        if(getSharedPreferences(PREF,MODE_PRIVATE).getBoolean("inference_active",false)){
+            state(false,"Previous four-stem test ended unexpectedly. Memory pressure or a native crash is possible. Try the short test and report whether it closes before or after chunk 1.");
+        }
     }
     private int dp(int v){return (int)(v*getResources().getDisplayMetrics().density+0.5f);}
     private GradientDrawable surface(int color,int round){
@@ -94,7 +100,7 @@ public final class FourStemActivity extends Activity {
         scroll.addView(content);setContentView(scroll);
         content.addView(label("DENNIS  /  STEM STUDIO",12,AQUA,true));gap(content,8);
         content.addView(label("Four-Stem Laboratory",27,FG,true));
-        content.addView(label("Experimental v0.1.2 · offline HT-Demucs · CPU quality-first",12,MUTE,false));gap(content,18);
+        content.addView(label("Experimental v0.1.3 · memory-safe short-test · offline HT-Demucs",12,MUTE,false));gap(content,18);
         LinearLayout p=panel(content,"01   Four-stem model");
         modelText=label("",13,MUTE,false);p.addView(modelText);gap(p,9);
         selectModel=button("Install HT-Demucs ONNX model");p.addView(selectModel);
@@ -106,9 +112,9 @@ public final class FourStemActivity extends Activity {
         selectAudio.setOnClickListener(v->selectFile(PICK_AUDIO,"audio/*"));
         gap(content,12);
         p=panel(content,"03   Separate 4 sources");
-        p.addView(label("Vocals · Drums · Bass · Other. Fixed 7.8 s segments with overlap, aligned stereo 48 kHz / 24-bit outputs.",13,MUTE,false));
+        p.addView(label("Select any full-length WAV. This first test automatically processes only its first 10 seconds. No editing or trimming needed. Four aligned 48 kHz / 24-bit stems.",13,MUTE,false));
         gap(p,11);
-        separate=button("Separate into 4 stems");p.addView(separate);
+        separate=button("Test first 10 seconds · 4 stems");p.addView(separate);
         separate.setOnClickListener(v->runSeparation());
         cancel=button("Cancel processing");p.addView(cancel);
         cancel.setOnClickListener(v->{FourStemNative.cancel();status.setText("Cancelling after current inference chunk…");cancel.setEnabled(false);});
@@ -135,7 +141,7 @@ public final class FourStemActivity extends Activity {
             startActivityForResult(intent,PICK_ZIP);
         });
         gap(content,12);
-        content.addView(label("Your original 2-stem mode remains on the previous screen. This is an independent experimental backend. Keep the screen open during processing.",12,MUTE,false));
+        content.addView(label("Full-song four-stem processing is disabled in this diagnostic version until the Demucs model passes on-device RAM testing. The existing full-song 2-stem mode is unchanged.",12,MUTE,false));
         refresh();
     }
     private void refresh(){
@@ -223,7 +229,7 @@ public final class FourStemActivity extends Activity {
                 ui.post(()->{
                     if(isModel)model=dest;
                     else{audio=dest;output=null;stopPlayer();}
-                    state(false,isModel?"HT-Demucs file imported. Model shape will be verified during inference.":"WAV imported. Ready for four-stem separation.");
+                    state(false,isModel?"HT-Demucs model imported. Model shape is checked at inference.":"Full WAV imported. The first 10 seconds will be tested automatically.");
                 });
             }catch(Throwable e){
                 if(temporary!=null)temporary.delete();
@@ -236,20 +242,31 @@ public final class FourStemActivity extends Activity {
         stopPlayer();output=null;
         File folder=new File(getExternalFilesDir(null)==null?getFilesDir():getExternalFilesDir(null),
                 "experimental-fourstem");
-        state(true,"Separating: preparing four-stem inference…");
+        state(true,"Separating first 10 seconds: loading model and checking memory…");
         progress.setProgress(0);
         executor.execute(()->{
             try{
                 if(!folder.exists() && !folder.mkdirs())throw new IOException("Cannot create stem folder");
                 StatFs fs=new StatFs(folder.getAbsolutePath());
-                long required=Math.max(420_000_000L,(audio.length()*4L)+200_000_000L);
-                if(fs.getAvailableBytes()<required)throw new IOException("Insufficient free space for 4 stems: free at least "+
+                long required=80_000_000L; // 4 × 10-second stereo PCM24 plus staging
+                if(fs.getAvailableBytes()<required)throw new IOException("Insufficient free space for preview stems: free at least "+
                         (required/1_000_000)+" MB");
-                String[] result=FourStemNative.separate(model.getAbsolutePath(),audio.getAbsolutePath(),
-                        folder.getAbsolutePath(),safeName(audio.getName()),(done,total)->ui.post(()->{
+                // A durable marker survives Android low-memory process kills, which cannot be caught.
+                SharedPreferences prefs=getSharedPreferences(PREF,MODE_PRIVATE);
+                prefs.edit().putBoolean("inference_active",true).putLong("started",System.currentTimeMillis()).commit();
+                String[] result;
+                try {
+                    result=FourStemNative.separate(model.getAbsolutePath(),audio.getAbsolutePath(),
+                        folder.getAbsolutePath(),safeName(audio.getName())+"_10sPreview",10,(done,total)->ui.post(()->{
                             progress.setProgress(total==0?0:(done*100/total));
-                            status.setText("Separating · chunk "+done+" of "+total);
+                            Debug.MemoryInfo mem=new Debug.MemoryInfo();
+                            Debug.getMemoryInfo(mem);
+                            status.setText((done==0?"Loading model · ":("Separated chunk "+done+"/"+total+" · "))+
+                                "process PSS ~"+(mem.getTotalPss()/1024)+" MB");
                         }));
+                } finally {
+                    prefs.edit().putBoolean("inference_active",false).commit();
+                }
                 if(result==null || result.length!=5)throw new IOException("Four-stem engine returned no files");
                 for(int i=0;i<4;i++)if(!new File(result[i]).isFile())
                     throw new IOException("Missing "+LABELS[i]+" output");
