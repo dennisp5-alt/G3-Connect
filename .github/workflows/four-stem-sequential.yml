@@ -1,0 +1,76 @@
+name: Dennis Stem Studio v0.1.4 Four-Stem Sequential
+on:
+  push:
+    branches:
+      - experiment/stem-studio-four-stem-sequential-v014
+    paths:
+      - 'app/**'
+      - 'experiments/four-stem/**'
+      - '.github/workflows/four-stem-sequential.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Android SDK and native inference engine
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
+            "platforms;android-35" "build-tools;35.0.0" "cmake;3.22.1" "ndk;27.2.12479018"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          bash scripts/prepare_native.sh
+      - name: Download verified KUIELab B bass model
+        run: |
+          python -m pip install --disable-pip-version-check onnx numpy 'sherpa-onnx==1.13.8'
+          mkdir -p /tmp/models prepared-model reports
+          curl -fLsS --retry 3 --retry-delay 2 \
+            "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/kuielab_b_bass.onnx?download=true" \
+            -o /tmp/models/kuielab_b_bass.onnx
+          echo "b4b7080fe501d0bece62076c5d4eda4d6590c5207ed78ec84a57bac0740a061d  /tmp/models/kuielab_b_bass.onnx" | sha256sum --check
+          python experiments/four-stem/prepare_bass_uvr.py \
+            --input /tmp/models/kuielab_b_bass.onnx \
+            --output prepared-model/kuielab_b_bass_sherpa.onnx
+          sha256sum prepared-model/kuielab_b_bass_sherpa.onnx
+      - name: Validate bass model against sherpa source-separation engine
+        run: |
+          python experiments/three-stem/test_sherpa_drum_model.py \
+            --model prepared-model/kuielab_b_bass_sherpa.onnx \
+            --report reports/kuielab_b_bass_sherpa_host.json
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Compile separate sequential-four-stem Android APK
+        run: gradle --no-daemon :app:assembleDebug
+      - name: Upload isolated Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DennisStemStudio-v0.1.4-FourStem-Sequential
+          path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
+          if-no-files-found: error
+      - name: Upload metadata-prepared bass model
+        uses: actions/upload-artifact@v4
+        with:
+          name: DennisStemStudio-KUIELabB-Bass-Model-Prepared
+          path: prepared-model/kuielab_b_bass_sherpa.onnx
+          retention-days: 30
+          if-no-files-found: error
+      - name: Upload bass host compatibility report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: DennisStemStudio-v0.1.4-Bass-Host-Test
+          path: reports/*.json
+          retention-days: 30
+          if-no-files-found: warn

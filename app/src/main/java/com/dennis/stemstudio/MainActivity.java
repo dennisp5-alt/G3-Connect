@@ -87,7 +87,11 @@ public class MainActivity extends Activity {
         extra.addView(text("TEST A NEW MODE",15,FG,true));gap(extra,8);
         Button three=button("3 STEMS · Vocals / Drums / Other");extra.addView(three);
         three.setOnClickListener(v->startActivity(new Intent(this,ThreeStemActivity.class)));
-        extra.addView(text("10-second preview · separate lightweight drum model",12,MUTE,false));
+        extra.addView(text("Existing 3-stem mode is unchanged in this build.",12,MUTE,false));
+        gap(extra,8);
+        Button four=button("4 STEMS · Vocals / Drums / Bass / Other");extra.addView(four);
+        four.setOnClickListener(v->startActivity(new Intent(this,FourStemActivity.class)));
+        extra.addView(text("Sequential AI processing · start with a 10-second preview.",12,MUTE,false));
         gap(body,16);
         body.addView(text("OR USE THE ORIGINAL TWO-STEM MODE",12,AQUA,true));gap(body,12);
 
