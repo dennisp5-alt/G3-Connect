@@ -195,7 +195,7 @@ public final class FourStemActivity extends Activity {
         p.addView(status);gap(body,12);
 
         p=panel(body,"04  Audition and export");
-        for(int i=0;i<4;i++{
+        for(int i=0;i<4;i++){
             final int which=i;
             preview[i]=button("▶  Audition "+LABELS[i]);p.addView(preview[i]);
             preview[i].setOnClickListener(v->play(which));
@@ -410,7 +410,7 @@ public final class FourStemActivity extends Activity {
                 }
                 if(result==null||result.length!=5)
                     throw new IOException("No four-stem results");
-                for(int i=0;i<4;i++{
+                for(int i=0;i<4;i++){
                     File out=new File(result[i]);
                     if(!out.isFile()||out.length()<44)
                         throw new IOException("Missing "+LABELS[i]+" WAV");
@@ -446,7 +446,7 @@ public final class FourStemActivity extends Activity {
                 try(ZipOutputStream z=new ZipOutputStream(out)){
                     z.setLevel(Deflater.BEST_SPEED);
                     byte[] buffer=new byte[131072];
-                    for(int i=0;i<4;i++{
+                    for(int i=0;i<4;i++){
                         File wavFile=new File(paths[i]);
                         z.putNextEntry(new ZipEntry(wavFile.getName()));
                         try(InputStream in=new FileInputStream(wavFile)){
@@ -468,7 +468,7 @@ public final class FourStemActivity extends Activity {
                 ContentResolver resolver=getContentResolver();
                 Uri parent=DocumentsContract.buildDocumentUriUsingTree(tree,
                     DocumentsContract.getTreeDocumentId(tree));
-                for(int i=0;i<4;i++{
+                for(int i=0;i<4;i++){
                     File file=new File(paths[i]);
                     Uri dest=DocumentsContract.createDocument(resolver,parent,"audio/wav",file.getName());
                     if(dest==null)throw new IOException("Cannot create WAV");

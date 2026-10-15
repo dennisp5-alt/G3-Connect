@@ -256,7 +256,7 @@ struct Scratch {
   double peak=0;
   Scratch(const std::string&folder,const std::string&prefix){
     const char*names[]{"Vocals","Drums","Bass","Other"};
-    for(int i=0;i<4;i>{
+    for(int i=0;i<4;i++){
       raw[i]=folder+"/"+prefix+"_"+names[i]+".floatpart";
       finals[i]=folder+"/"+prefix+"_"+names[i]+"_24bit.wav";
       partial[i]=finals[i]+".partial";
@@ -270,7 +270,7 @@ struct Scratch {
     for(auto&p:partial)if(!p.empty())std::remove(p.c_str());
   }
   void append(const std::array<std::vector<float>,4>&v,size_t begin,size_t count){
-    for(int i=0;i<4;i>{
+    for(int i=0;i<4;i++){
       if(v[i].size()<2*(begin+count))throw std::runtime_error("Bad stem buffer");
       const float*data=v[i].data()+2*begin;
       for(size_t j=0;j<2*count;j++){
@@ -284,13 +284,13 @@ struct Scratch {
   }
   void saveTail(const std::array<std::vector<float>,4>&v,size_t count){
     pending=count;
-    for(int i=0;i<4;i>
+    for(int i=0;i<4;i++)
       tail[i].assign(v[i].end()-2*count,v[i].end());
   }
   void join(const std::array<std::vector<float>,4>&left){
     if(!pending)return;
     std::array<std::vector<float>,4> joined;
-    for(int s=0;s<4;s>{
+    for(int s=0;s<4;s++){
       joined[s].resize(pending*2);
       for(size_t i=0;i<pending;i++){
         const double t=(i+0.5)/double(pending);
@@ -329,7 +329,7 @@ std::array<std::vector<float>,4> render(const SherpaOnnxSourceSeparationOutput*v
           double(bass->stems[0].samples[c][local48+i]);
       const double other=outputSample(voice,drum,2,c,uint32_t(local48+i))-bassValue;
       const double x[]{vocal,drums,bassValue,other};
-      for(int s=0;s<4;s>{
+      for(int s=0;s<4;s++){
         if(!std::isfinite(x[s]))throw std::runtime_error("Nonfinite separated sample");
         result[s][2*i+c]=float(x[s]);
       }
@@ -348,7 +348,7 @@ void writeHeader(FILE*f,size_t frames){
   if(fwrite("data",1,4,f)!=4)throw std::runtime_error("WAV header failure");
   write32(f,uint32_t(bytes));
 }
-std::array<std::string,4> extract(JNIEnv*env,
+std::array<std::string,5> extract(JNIEnv*env,
   const std::string&vocalModel,const std::string&drumModel,const std::string&wav,
   const std::string&folder,const std::string&prefix,const std::string&bassModel,int start,
   int duration,jobject callback){
@@ -427,7 +427,7 @@ std::array<std::string,4> extract(JNIEnv*env,
   writer.finishScratch();
   if(writer.written!=outFrames)throw std::runtime_error("Assembled WAV frame count mismatch");
   const double gain=writer.peak>0.9999?0.9999/writer.peak:1.;
-  for(int st=0;st<4;st>{
+  for(int st=0;st<4;st++){
     checkCancel();
     progress(env,callback,4,st,count);
     FileHandle in(writer.raw[st],"rb");
@@ -452,14 +452,14 @@ std::array<std::string,4> extract(JNIEnv*env,
     }
     if(fflush(out.get())!=0||ferror(out.get()))throw std::runtime_error("WAV flush error");
   }
-  for(int st=0;st<4;st>{
+  for(int st=0;st<4;st++){
     if(std::rename(writer.partial[st].c_str(),writer.finals[st].c_str())!=0)
       throw std::runtime_error("Cannot finalize stem WAV");
     writer.partial[st].clear();
   }
   progress(env,callback,5,count,count);
   std::array<std::string,5> result{};
-  for(int st=0;st<4;st>result[st]=writer.finals[st];
+  for(int st=0;st<4;st++)result[st]=writer.finals[st];
   result[4]=std::string(duration==0?"Full song":duration==60?"60s test":"10s test")+
      " · "+std::to_string(count)+" sections · shared gain "+
      std::to_string(20*std::log10(gain))+" dB";
