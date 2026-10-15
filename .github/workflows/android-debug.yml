@@ -1,4 +1,4 @@
-name: Android quality-first engine test
+name: Dennis Stem Studio Android
 on:
   push:
     branches: [ main ]
@@ -29,7 +29,7 @@ jobs:
         run: gradle --no-daemon :app:assembleDebug
       - uses: actions/upload-artifact@v4
         with:
-          name: DennisStemStudio-v0.1.0-engine-test-debug
+          name: DennisStemStudio-v0.1.1-48k-stemlab-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 15

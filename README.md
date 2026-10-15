@@ -1,13 +1,11 @@
-# Dennis Stem Studio · v0.1.0-engine-test
+# Dennis Stem Studio · v0.1.1 (48 kHz Stem Lab export)
 
 Standalone **offline** Android stem separator for Galaxy S23 Ultra (arm64).
 Independent application ID `com.dennis.stemstudio`; does not access or modify Dennis AI Mastering Lab.
 
 ## Status
 
-This repository contains an **unverified first implementation** for a 2-stem, quality-first engine test.
-It is not validated on a device, and no successful APK build is implied by the presence of source code.
-The C ABI / library compatibility and imported model must be verified with a real build and phone test.
+An Android debug APK for v0.1.0 has built successfully, but actual audio quality, resampling accuracy and app behavior must be verified on the S23 Ultra. This new v0.1.1 export build is also subject to CI and on-device testing.
 
 ## What v0.1 actually implements
 
@@ -15,8 +13,8 @@ The C ABI / library compatibility and imported model must be verified with a rea
 - Pick an ONNX UVR model file from local storage, persist a private copy for subsequent offline operation.
 - Pick an ordinary stereo WAV (PCM 16/24/32 or float32, 44.1/48 kHz).
 - Run CPU inference on a background thread without estimating fake progress.
-- Save two **24-bit PCM stereo WAV** outputs in an app-private working folder.
-- Audition both stems; export both to a user-chosen document folder.
+- Save two **48 kHz / 24-bit PCM stereo WAV** outputs in an app-private working folder. Model-native 44.1 kHz audio undergoes polyphase windowed-sinc resampling with a shared safety gain only if needed.
+- Audition both stems; export individual WAVs to a chosen folder or export a directly compatible **Stem Lab ZIP** with both WAV stems.
 - Output diagnostics include common attenuation (only when needed to avoid 24-bit clipping).
 
 **Not in this version:** 4-/6-stem separation, automated model downloads, MP3/FLAC decoding,
@@ -33,14 +31,14 @@ Prerequisites: Android SDK 35; Android NDK 27.2.12479018; CMake 3.22.1; JDK17; G
 gradle :app:assembleDebug
 ```
 
-The included GitHub Actions workflow can produce an APK once the files are committed to the repurposed **G3-Connect** repository (original G3 code archived on `archive/g3-connect-v0.6.2`).
+The GitHub Actions workflow builds a debug APK and uploads the artifact from the repurposed **G3-Connect** repository (original G3 code archived on `archive/g3-connect-v0.6.2`).
 The source package deliberately does not contain 3rd-party native .so binaries or pre-trained model weights.
 
 ## Model installation (user action)
 
 Download a *compatible* UVR / MDX-Net ONNX model through an authorised source
 (e.g. the official sherpa-onnx source-separation model release), save it locally on your phone,
-then press **Install separation model** and select its `.onnx` file.
+then press **Install local UVR model (.onnx)** and select its `.onnx` file.
 
 Suggested initial compatibility test model: `UVR_MDXNET_9482.onnx` from
 https://github.com/k2-fsa/sherpa-onnx/releases/tag/source-separation-models
