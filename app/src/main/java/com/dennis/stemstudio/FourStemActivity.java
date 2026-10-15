@@ -19,6 +19,9 @@ import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
 import android.view.View;
 import android.widget.Button;
+import android.widget.Spinner;
+import android.widget.ArrayAdapter;
+import android.view.WindowManager;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
@@ -56,6 +59,8 @@ public final class FourStemActivity extends Activity {
     private Button selectModel,selectAudio,separate,cancel,exportZip,exportFolder;
     private final Button[] previews=new Button[4];
     private ProgressBar progress;
+    private Spinner section;
+    private static final int[] PREVIEW_START={0,0,30,60,90,120,180};
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -100,7 +105,7 @@ public final class FourStemActivity extends Activity {
         scroll.addView(content);setContentView(scroll);
         content.addView(label("DENNIS  /  STEM STUDIO",12,AQUA,true));gap(content,8);
         content.addView(label("Four-Stem Laboratory",27,FG,true));
-        content.addView(label("Experimental v0.1.3 · memory-safe short-test · offline HT-Demucs",12,MUTE,false));gap(content,18);
+        content.addView(label("Experimental v0.1.4 · disk-backed full-song Demucs",12,MUTE,false));gap(content,18);
         LinearLayout p=panel(content,"01   Four-stem model");
         modelText=label("",13,MUTE,false);p.addView(modelText);gap(p,9);
         selectModel=button("Install HT-Demucs ONNX model");p.addView(selectModel);
@@ -112,9 +117,24 @@ public final class FourStemActivity extends Activity {
         selectAudio.setOnClickListener(v->selectFile(PICK_AUDIO,"audio/*"));
         gap(content,12);
         p=panel(content,"03   Separate 4 sources");
-        p.addView(label("Select any full-length WAV. This first test automatically processes only its first 10 seconds. No editing or trimming needed. Four aligned 48 kHz / 24-bit stems.",13,MUTE,false));
-        gap(p,11);
-        separate=button("Test first 10 seconds · 4 stems");p.addView(separate);
+        p.addView(label("Choose full-song processing or a 10-second preview from a later section. No trimming is needed. Offline · 48 kHz / 24-bit aligned stems.",13,MUTE,false));
+        gap(p,10);
+        section=new Spinner(this);
+        String[] modes={
+            "Full song · highest quality",
+            "Preview first 10 seconds",
+            "Preview 0:30 - 0:40",
+            "Preview 1:00 - 1:10",
+            "Preview 1:30 - 1:40",
+            "Preview 2:00 - 2:10",
+            "Preview 3:00 - 3:10"};
+        ArrayAdapter<String> adapter=new ArrayAdapter<>(this,android.R.layout.simple_spinner_item,modes);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        section.setAdapter(adapter);
+        section.setSelection(0);
+        p.addView(section,new LinearLayout.LayoutParams(-1,dp(52)));
+        gap(p,10);
+        separate=button("Separate into 4 stems · Start");p.addView(separate);
         separate.setOnClickListener(v->runSeparation());
         cancel=button("Cancel processing");p.addView(cancel);
         cancel.setOnClickListener(v->{FourStemNative.cancel();status.setText("Cancelling after current inference chunk…");cancel.setEnabled(false);});
@@ -141,7 +161,7 @@ public final class FourStemActivity extends Activity {
             startActivityForResult(intent,PICK_ZIP);
         });
         gap(content,12);
-        content.addView(label("Full-song four-stem processing is disabled in this diagnostic version until the Demucs model passes on-device RAM testing. The existing full-song 2-stem mode is unchanged.",12,MUTE,false));
+        content.addView(label("Memory-efficient four-stem export spools temporary 44.1 kHz float audio to disk, then applies one shared anti-clipping gain while writing aligned 48 kHz WAVs. Long songs can take many minutes. Keep the app open.",12,MUTE,false));
         refresh();
     }
     private void refresh(){
@@ -149,6 +169,7 @@ public final class FourStemActivity extends Activity {
                "Installed offline · "+(model.length()/1048576)+" MiB");
         audioText.setText(audio==null?"No WAV selected. Maximum 12 minutes.":audio.getName());
         selectModel.setEnabled(!busy);selectAudio.setEnabled(!busy);
+        section.setEnabled(!busy);
         separate.setEnabled(!busy && model!=null && audio!=null);
         cancel.setVisibility(processing?View.VISIBLE:View.GONE);
         cancel.setEnabled(processing);
@@ -163,6 +184,7 @@ public final class FourStemActivity extends Activity {
     }
     private void fail(String name,Throwable error){
         ui.post(()->{
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             processing=false;
             state(false,name+": "+(error.getMessage()==null?error.getClass().getSimpleName():error.getMessage()));
         });
@@ -229,7 +251,7 @@ public final class FourStemActivity extends Activity {
                 ui.post(()->{
                     if(isModel)model=dest;
                     else{audio=dest;output=null;stopPlayer();}
-                    state(false,isModel?"HT-Demucs model imported. Model shape is checked at inference.":"Full WAV imported. The first 10 seconds will be tested automatically.");
+                    state(false,isModel?"HT-Demucs model imported. Model shape is checked at inference.":"WAV imported. Select full song or a preview segment, then start separation.");
                 });
             }catch(Throwable e){
                 if(temporary!=null)temporary.delete();
@@ -240,15 +262,24 @@ public final class FourStemActivity extends Activity {
     private void runSeparation(){
         if(busy||audio==null||model==null)return;
         stopPlayer();output=null;
+        final int mode=section.getSelectedItemPosition();
+        final int previewSeconds=mode==0?0:10;
+        final int startSeconds=PREVIEW_START[Math.max(0,Math.min(mode,PREVIEW_START.length-1))];
+        final String prefix=safeName(audio.getName())+
+                (previewSeconds==0?"_4StemFull":"_4StemPreview"+startSeconds+"s");
         File folder=new File(getExternalFilesDir(null)==null?getFilesDir():getExternalFilesDir(null),
                 "experimental-fourstem");
-        state(true,"Separating first 10 seconds: loading model and checking memory…");
+        state(true,previewSeconds==0?"Separating full song: preparing streaming inference…":
+                "Separating preview from "+startSeconds+" seconds…");
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         progress.setProgress(0);
         executor.execute(()->{
             try{
                 if(!folder.exists() && !folder.mkdirs())throw new IOException("Cannot create stem folder");
                 StatFs fs=new StatFs(folder.getAbsolutePath());
-                long required=80_000_000L; // 4 × 10-second stereo PCM24 plus staging
+                long required=previewSeconds>0?200_000_000L:
+                    Math.max(900_000_000L,Math.min(3_000_000_000L,audio.length()*30L));
+                // Full song needs room for four float scratch stems AND four final 24-bit WAVs.
                 if(fs.getAvailableBytes()<required)throw new IOException("Insufficient free space for preview stems: free at least "+
                         (required/1_000_000)+" MB");
                 // A durable marker survives Android low-memory process kills, which cannot be caught.
@@ -257,12 +288,21 @@ public final class FourStemActivity extends Activity {
                 String[] result;
                 try {
                     result=FourStemNative.separate(model.getAbsolutePath(),audio.getAbsolutePath(),
-                        folder.getAbsolutePath(),safeName(audio.getName())+"_10sPreview",10,(done,total)->ui.post(()->{
-                            progress.setProgress(total==0?0:(done*100/total));
+                        folder.getAbsolutePath(),prefix,previewSeconds,startSeconds,
+                        (done,total)->ui.post(()->{
                             Debug.MemoryInfo mem=new Debug.MemoryInfo();
                             Debug.getMemoryInfo(mem);
-                            status.setText((done==0?"Loading model · ":("Separated chunk "+done+"/"+total+" · "))+
-                                "process PSS ~"+(mem.getTotalPss()/1024)+" MB");
+                            if(done>=0){
+                                progress.setProgress(total==0?0:done*88/total);
+                                status.setText((done==0?"Loading Demucs model · ":("Extracting segment "+done+"/"+total+" · "))+
+                                    "memory ~"+(mem.getTotalPss()/1024)+" MB");
+                            }else if(done==-1){
+                                progress.setProgress(90);
+                                status.setText("Measuring 48 kHz stem peaks · applying shared safety gain…");
+                            }else if(done==-2){
+                                progress.setProgress(94);
+                                status.setText("Writing 24-bit WAV stems to disk…");
+                            }
                         }));
                 } finally {
                     prefs.edit().putBoolean("inference_active",false).commit();
@@ -270,7 +310,7 @@ public final class FourStemActivity extends Activity {
                 if(result==null || result.length!=5)throw new IOException("Four-stem engine returned no files");
                 for(int i=0;i<4;i++)if(!new File(result[i]).isFile())
                     throw new IOException("Missing "+LABELS[i]+" output");
-                ui.post(()->{output=result;processing=false;state(false,result[4]);});
+                ui.post(()->{output=result;processing=false;getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);progress.setProgress(100);state(false,result[4]);});
             }catch(Throwable e){fail("Four-stem processing stopped",e);}
         });
     }
@@ -332,7 +372,7 @@ public final class FourStemActivity extends Activity {
         });
     }
     @Override protected void onDestroy(){
-        FourStemNative.cancel();stopPlayer();executor.shutdown();
+        FourStemNative.cancel();getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);stopPlayer();executor.shutdown();
         super.onDestroy();
     }
 }

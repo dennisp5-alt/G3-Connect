@@ -578,6 +578,7 @@ std::array<std::string,5> separate(JNIEnv*env,const std::string&model,const std:
   require(outputFrames>0,"No output frames");
   const char*labels[]{"Vocals","Drums","Bass","Other"};
   const int order[]{3,0,1,2};
+  progress(env,listener,-1,int(nchunks));
   // Shared gain from the largest true output sample, across all four stems.
   double peak=0;
   for(int st=0;st<4;st++){
@@ -592,6 +593,7 @@ std::array<std::string,5> separate(JNIEnv*env,const std::string&model,const std:
       });
   }
   const double gain=peak>0.9999?0.9999/peak:1.;
+  progress(env,listener,-2,int(nchunks));
   std::array<std::string,5> result{};
   for(int i=0;i<4;i++){
     cancelledCheck();

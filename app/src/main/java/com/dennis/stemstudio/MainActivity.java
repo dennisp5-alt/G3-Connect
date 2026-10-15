@@ -89,7 +89,7 @@ public class MainActivity extends Activity {
         Button openFour=button("4 STEMS · Vocals / Drums / Bass / Other");
         selector.addView(openFour);
         openFour.setOnClickListener(v->startActivity(new Intent(this,FourStemActivity.class)));
-        selector.addView(text("Four-stem experimental mode · automatic 10-second test from any WAV",12,MUTE,false));
+        selector.addView(text("Four-stem mode · full song or selectable 10-second preview",12,MUTE,false));
         gap(selector,8);
         selector.addView(text("2 STEMS · Vocals / Instrumental",15,FG,true));
         selector.addView(text("The original two-stem controls are below.",12,MUTE,false));
@@ -132,7 +132,7 @@ public class MainActivity extends Activity {
             startActivityForResult(i,PICK_STEM_ZIP);
         });
         gap(body,16);
-        body.addView(text("FOUR-STEM LAB v0.1.3 · Select the four-stem option at the top. Its model and audio imports are separate from this trusted two-stem screen.",11,MUTE,false));
+        body.addView(text("FOUR-STEM LAB v0.1.4 · Select the four-stem option at the top. Its model and audio imports are separate from this trusted two-stem screen.",11,MUTE,false));
         refresh();
     }
     private void refresh(){

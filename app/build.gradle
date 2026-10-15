@@ -8,8 +8,8 @@ android {
         applicationId 'com.dennis.stemstudio'
         minSdk 29
         targetSdk 34
-        versionCode 4
-        versionName '0.1.3-4stem-memory-diagnostic'
+        versionCode 5
+        versionName '0.1.4-4stem-streaming'
         ndk { abiFilters 'arm64-v8a' }
         externalNativeBuild {
             cmake { cppFlags '-std=c++17 -Wall -Wextra' }
