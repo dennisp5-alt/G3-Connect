@@ -10,6 +10,8 @@ import android.graphics.drawable.GradientDrawable;
 import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Debug;
+import android.content.SharedPreferences;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.StatFs;
@@ -46,18 +48,33 @@ public final class ThreeStemActivity extends Activity {
        FG=Color.rgb(242,247,250), MUTE=Color.rgb(153,169,181),
        AQUA=Color.rgb(97,207,212);
     private static final String[] LABELS={"Vocals","Drums","Other"};
-    private static final int[] START={0,30,60,90,120,180};
+    private static final int[] START={0,60,0,0,30,60,90,120,180};
+    private static final int[] DURATIONS={0,60,60,10,10,10,10,10,10};
+    private static final String PREFERENCES="three_stem_diagnostics";
     private static final String DRUM_FILENAME="kuielab_b_drums_sherpa.onnx";
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
     private final Handler main=new Handler(Looper.getMainLooper());
     private File vocal,drum,wav;
     private String[] stems;
     private TextView vocalLabel,drumLabel,wavLabel,status;
-    private Button vocalButton,drumButton,wavButton,separate,exportZip,exportWavs;
+    private Button vocalButton,drumButton,wavButton,separate,cancel,exportZip,exportWavs;
     private Button[] preview=new Button[3];
     private ProgressBar progress;
     private Spinner section;
     private boolean busy=false;
+    private boolean extracting=false;
+    private long startedAt=0;
+    private String currentPhase="Ready";
+    private int currentPss=0;
+    private final Runnable clock=new Runnable(){
+        @Override public void run(){
+            if(extracting){
+                status.setText(currentPhase+" · "+formatElapsed(System.nanoTime()-startedAt)+
+                    " elapsed · memory ~"+currentPss+" MB");
+                main.postDelayed(this,1000);
+            }
+        }
+    };
     private MediaPlayer player;
 
     @Override public void onCreate(Bundle state){
@@ -68,6 +85,15 @@ public final class ThreeStemActivity extends Activity {
         if(!vocal.isFile() || vocal.length()<1024*1024)vocal=null;
         if(!drum.isFile() || drum.length()<15_000_000L)drum=null;
         render();
+        SharedPreferences prefs=getSharedPreferences(PREFERENCES,MODE_PRIVATE);
+        if(prefs.getBoolean("inference_active",false)){
+            prefs.edit().putBoolean("inference_active",false).apply();
+            status.setText("Previous three-stem run ended unexpectedly. Memory pressure or a native failure may have occurred. Try a shorter preview and report the stage shown before it closed.");
+        }
+    }
+    private String formatElapsed(long nanos){
+        long sec=Math.max(0,nanos/1_000_000_000L);
+        return String.format(Locale.ROOT,"%02d:%02d",sec/60,sec%60);
     }
     private int dp(int x){return (int)(getResources().getDisplayMetrics().density*x+.5f);}
     private GradientDrawable background(int color,int radius){
@@ -109,7 +135,7 @@ public final class ThreeStemActivity extends Activity {
         scroll.addView(body);setContentView(scroll);
         body.addView(text("DENNIS  /  STEM STUDIO",12,AQUA,true));gap(body,8);
         body.addView(text("3-Stem Laboratory",27,FG,true));
-        body.addView(text("Experimental v0.1.2 · lightweight MDX-Net drums",12,MUTE,false));
+        body.addView(text("Experimental v0.1.3 · full-song streaming three-stem engine",12,MUTE,false));
         gap(body,17);
 
         LinearLayout p=panel(body,"01  Models · both offline");
@@ -128,19 +154,32 @@ public final class ThreeStemActivity extends Activity {
         wavButton.setOnClickListener(v->pick(PICK_WAV,"audio/*"));
         gap(body,12);
 
-        p=panel(body,"03  Select test section");
-        p.addView(text("Choose any part of a normal song. We separate 10 seconds first to measure speed without risking an expensive full-song attempt.",13,MUTE,false));
+        p=panel(body,"03  Choose processing mode");
+        p.addView(text("Full-song separation processes short sections to reduce memory. Try a 60-second section first to assess processing time, or keep using a 10-second preview.",13,MUTE,false));
         gap(p,10);
         section=new Spinner(this);
         String[] segments={
-            "0:00 to 0:10","0:30 to 0:40","1:00 to 1:10",
-            "1:30 to 1:40","2:00 to 2:10","3:00 to 3:10"};
+            "FULL SONG · separate entire WAV",
+            "60 seconds · 1:00–2:00",
+            "60 seconds · 0:00–1:00",
+            "10 seconds · 0:00–0:10",
+            "10 seconds · 0:30–0:40",
+            "10 seconds · 1:00–1:10",
+            "10 seconds · 1:30–1:40",
+            "10 seconds · 2:00–2:10",
+            "10 seconds · 3:00–3:10"};
         ArrayAdapter<String> adapter=new ArrayAdapter<>(this,
             android.R.layout.simple_spinner_item,segments);
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        section.setAdapter(adapter);section.setSelection(2);
+        section.setAdapter(adapter);section.setSelection(1);
         p.addView(section,new LinearLayout.LayoutParams(-1,dp(48)));
-        separate=button("Test 3-stem extraction");p.addView(separate);
+        separate=button("Separate 3 stems · Start");p.addView(separate);
+        cancel=button("Cancel after current AI section");p.addView(cancel);
+        cancel.setOnClickListener(v->{
+            ThreeStemNative.cancel();
+            currentPhase="Cancelling after current AI section…";
+            cancel.setEnabled(false);
+        });
         separate.setOnClickListener(v->runSeparation());
         progress=new ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal);
         progress.setMax(100);p.addView(progress,new LinearLayout.LayoutParams(-1,dp(12)));
@@ -166,7 +205,7 @@ public final class ThreeStemActivity extends Activity {
         exportWavs.setOnClickListener(v->startActivityForResult(
             new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE),PICK_FOLDER));
         gap(body,13);
-        body.addView(text("This test runs two light models sequentially: the original voice model then a drum specialist. It is not yet a full-song release. The working 2-stem mode stays unchanged.",12,MUTE,false));
+        body.addView(text("Two lightweight AI passes run per section. Long songs may still take several minutes. Keep the phone unlocked and watch for temperature or memory pressure. The protected two-stem mode remains unchanged.",12,MUTE,false));
         refresh();
     }
     private void refresh(){
@@ -176,6 +215,8 @@ public final class ThreeStemActivity extends Activity {
              "Drums specialist installed · "+(drum.length()/1048576)+" MB");
         wavLabel.setText(wav==null?"No WAV imported. Stereo 44.1/48 kHz, max 12 minutes.":wav.getName());
         vocalButton.setEnabled(!busy);drumButton.setEnabled(!busy);
+        cancel.setVisibility(extracting?View.VISIBLE:View.GONE);
+        cancel.setEnabled(extracting);
         wavButton.setEnabled(!busy);section.setEnabled(!busy);
         separate.setEnabled(!busy && vocal!=null && drum!=null && wav!=null);
         boolean canExport=!busy && stems!=null;
@@ -188,10 +229,15 @@ public final class ThreeStemActivity extends Activity {
     }
     private void failure(String title,Throwable error){
         main.post(()->{
+            finishTimer();
             getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             state(false,title+": "+(error.getMessage()==null?
               error.getClass().getSimpleName():error.getMessage()));
         });
+    }
+    private void finishTimer(){
+        extracting=false;
+        main.removeCallbacks(clock);
     }
     private void pick(int req,String mime){
         Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT);
@@ -284,44 +330,82 @@ public final class ThreeStemActivity extends Activity {
     private void runSeparation(){
         if(busy||vocal==null||drum==null||wav==null)return;
         stopPlayer();stems=null;
-        final int start=START[Math.max(0,Math.min(section.getSelectedItemPosition(),START.length-1))];
-        final String filename=safe(wav.getName())+"_3StemPreview"+start+"s";
+        final int mode=Math.max(0,Math.min(section.getSelectedItemPosition(),START.length-1));
+        final int start=START[mode],duration=DURATIONS[mode];
+        final String name=safe(wav.getName())+
+            (duration==0?"_3StemFull":duration==60?"_3Stem60s"+start:"_3Stem10s"+start);
         File base=getExternalFilesDir(null)==null?getFilesDir():getExternalFilesDir(null);
         final File directory=new File(base,"3stem-experiment");
-        state(true,"Preparing two-pass three-stem test…");
+        state(true,duration==0?"Preparing full-song three-stem extraction…":
+                           "Preparing "+duration+"-second preview…");
         progress.setProgress(0);
+        startedAt=System.nanoTime();
+        extracting=true;
+        currentPhase="Loading first AI section";
+        currentPss=0;
+        main.removeCallbacks(clock);
+        main.post(clock);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         worker.execute(()->{
+            SharedPreferences prefs=getSharedPreferences(PREFERENCES,MODE_PRIVATE);
             try{
-                if(!directory.exists()&&!directory.mkdirs())throw new IOException("Cannot create output storage");
+                if(!directory.exists()&&!directory.mkdirs())
+                    throw new IOException("Cannot create output storage");
                 StatFs store=new StatFs(directory.getAbsolutePath());
-                if(store.getAvailableBytes()<100_000_000L)
-                   throw new IOException("Free at least 100 MB of storage");
-                long startMs=System.nanoTime();
-                String[] result=ThreeStemNative.separate(
-                    vocal.getAbsolutePath(),drum.getAbsolutePath(),wav.getAbsolutePath(),
-                    directory.getAbsolutePath(),filename,start,
-                    phase->main.post(()->{
-                        progress.setProgress(phase*33);
-                        String[] phases={"Loading vocals model and extracting vocal stem…",
-                            "Vocals complete · separating drums…",
-                            "Drums complete · aligning and exporting 24-bit WAV…",
-                            "Three-stem export complete."};
-                        status.setText(phases[Math.max(0,Math.min(phase,3))]);
-                    }));
-                if(result==null||result.length!=4)throw new IOException("No three-stem results");
-                for(int i=0;i<3;i++){
-                    File f=new File(result[i]);
-                    if(!f.isFile()||f.length()<44)
-                        throw new IOException("Missing stem: "+LABELS[i]);
+                if(store.getAvailableBytes()<150_000_000L)
+                    throw new IOException("Free at least 150 MB. Full songs require more scratch storage.");
+                // Synchronous marker survives system process kill; never confuse user cancellation.
+                if(!prefs.edit().putBoolean("inference_active",true).commit())
+                    throw new IOException("Cannot write crash-recovery marker");
+                String[] result;
+                try{
+                    result=ThreeStemNative.separate(
+                        vocal.getAbsolutePath(),drum.getAbsolutePath(),wav.getAbsolutePath(),
+                        directory.getAbsolutePath(),name,start,duration,
+                        (phase,chunk,total)->main.post(()->{
+                            if(!extracting)return;
+                            int percent;
+                            String next;
+                            if(phase<3){
+                                percent=(int)((chunk*3.0+phase)*82.0/(total*3.0));
+                                next="Section "+(chunk+1)+"/"+total+" · "+
+                                    (phase==0?"separating vocals":
+                                     phase==1?"separating drums":"aligning and saving audio");
+                            }else if(phase==3){
+                                percent=84+5*chunk;
+                                next="Final WAV export "+(chunk+1)+"/3";
+                            }else{
+                                percent=100;
+                                next="Three-stem extraction complete";
+                            }
+                            progress.setProgress(Math.min(100,percent));
+                            Debug.MemoryInfo mem=new Debug.MemoryInfo();
+                            Debug.getMemoryInfo(mem);
+                            currentPss=mem.getTotalPss()/1024;
+                            currentPhase=next;
+                            status.setText(currentPhase+" · "+
+                                formatElapsed(System.nanoTime()-startedAt)+
+                                " · memory ~"+currentPss+" MB");
+                        }));
+                }finally{
+                    prefs.edit().putBoolean("inference_active",false).commit();
                 }
-                long elapsed=(System.nanoTime()-startMs)/1_000_000_000L;
+                if(result==null||result.length!=4)
+                    throw new IOException("No three-stem results");
+                for(int i=0;i<3;i++){
+                    File out=new File(result[i]);
+                    if(!out.isFile()||out.length()<44)
+                        throw new IOException("Missing "+LABELS[i]+" WAV");
+                }
+                final String elapsed=formatElapsed(System.nanoTime()-startedAt);
                 main.post(()->{
                     stems=result;
+                    finishTimer();
+                    progress.setProgress(100);
                     getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-                    state(false,result[3]+" · Processing time "+elapsed+" seconds");
+                    state(false,result[3]+" · Processing time "+elapsed);
                 });
-            }catch(Throwable error){failure("3-stem test failed",error);}
+            }catch(Throwable error){failure("3-stem extraction stopped",error);}
         });
     }
     private void play(int which){
@@ -382,7 +466,8 @@ public final class ThreeStemActivity extends Activity {
         });
     }
     @Override protected void onDestroy(){
-        stopPlayer();worker.shutdown();
+        if(extracting)ThreeStemNative.cancel();
+        finishTimer();stopPlayer();worker.shutdown();
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         super.onDestroy();
     }

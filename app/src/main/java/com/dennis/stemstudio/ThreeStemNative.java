@@ -7,8 +7,9 @@ final class ThreeStemNative {
         System.loadLibrary("sherpa-onnx-c-api");
         System.loadLibrary("dennisthree");
     }
-    interface Progress { void onProgress(int phase); }
+    interface Progress { void onProgress(int phase, int chunk, int total); }
     static native String[] separate(String vocalModel, String drumModel, String wav,
-       String directory, String prefix, int startSeconds, Progress callback);
+       String directory, String prefix, int startSeconds, int durationSeconds, Progress callback);
+    static native void cancel();
     private ThreeStemNative() {}
 }
