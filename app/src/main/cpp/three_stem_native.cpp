@@ -164,11 +164,11 @@ const QualityResampler48& resampler48() {
 // Three-stem sum-preserving construction: vocals + drums + other
 // equals vocals + instrumental in floating point before quantizing.
 struct OutputCleaner {
-  void operator()(SherpaOnnxSourceSeparationOutput* output) const {
+  void operator()(const SherpaOnnxSourceSeparationOutput* output) const {
     if(output) SherpaOnnxDestroySourceSeparationOutput(output);
   }
 };
-using OutputPtr=std::unique_ptr<SherpaOnnxSourceSeparationOutput,OutputCleaner>;
+using OutputPtr=std::unique_ptr<const SherpaOnnxSourceSeparationOutput,OutputCleaner>;
 std::atomic<bool> busy{false};
 void validateOutput(const SherpaOnnxSourceSeparationOutput* output,const std::string&label) {
   if(!output || output->num_stems!=2 || !output->stems)
