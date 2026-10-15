@@ -13,6 +13,7 @@ LIBS="$(find "$TMP/out" -type f -path '*/arm64-v8a/libsherpa-onnx-c-api.so' | he
 if [[ -z "$LIBS" || ! -s "$LIBS/libsherpa-onnx-c-api.so" || ! -s "$LIBS/libonnxruntime.so" ]]; then
   echo 'Required prebuilt arm64 C API/ONNX libraries missing from upstream archive' >&2; exit 1
 fi
+mkdir -p app/src/main/jniLibs/arm64-v8a
 cp "$LIBS"/*.so app/src/main/jniLibs/arm64-v8a/
 # Copy C++ sibling .so too, where present: C API libraries may depend on it.
 mkdir -p app/src/main/cpp/sherpa-onnx/c-api
