@@ -14,6 +14,7 @@
 #include <memory>
 #include <atomic>
 #include <vector>
+#include <sys/statvfs.h>
 #include "sherpa-onnx/c-api/c-api.h"
 
 namespace {
@@ -21,6 +22,7 @@ struct Audio {
   uint32_t rate = 0;
   int channels = 0;
   size_t frames = 0;
+  size_t totalFrames = 0;
   std::vector<std::vector<float>> planes;
 };
 
@@ -42,7 +44,7 @@ class FileHandle {
  private: FILE* f_;
 };
 
-Audio loadWav(const std::string& name, int startSeconds, int previewSeconds) {
+Audio loadWav(const std::string& name, size_t startFrame, size_t requestedFrames) {
   FileHandle file(name, "rb"); FILE* f = file.get();
   unsigned char riff[12];
   if (fread(riff,1,12,f)!=12 || memcmp(riff,"RIFF",4)!=0 || memcmp(riff+8,"WAVE",4)!=0)
@@ -84,15 +86,14 @@ Audio loadWav(const std::string& name, int startSeconds, int previewSeconds) {
   if(totalFrames==0 || totalFrames>size_t(rate)*12*60)
     throw std::runtime_error("Audio must be between one sample and 12 minutes in the engine test");
 
-  if (previewSeconds!=10 || startSeconds<0 || startSeconds>720)
-    throw std::runtime_error("Experimental test requires a 10-second preview");
-  const size_t selection=size_t(rate)*10;
-  const size_t offset=std::min(size_t(rate)*size_t(startSeconds),
-                               totalFrames>selection ? totalFrames-selection : size_t(0));
-  const size_t frames=std::min(selection,totalFrames-offset);
-  if(fseek(f,dataAt+long(offset*blockAlign),SEEK_SET)!=0)
-    throw std::runtime_error("Cannot seek to preview section");
-  Audio audio; audio.rate=rate; audio.channels=2; audio.frames=frames;
+  if(startFrame>totalFrames || requestedFrames>totalFrames-startFrame)
+    throw std::runtime_error("Selected source frames exceed WAV length");
+  Audio audio; audio.rate=rate; audio.channels=2; audio.frames=requestedFrames;
+  audio.totalFrames=totalFrames;
+  if(requestedFrames==0)return audio;
+  if(fseek(f,dataAt+long(startFrame*blockAlign),SEEK_SET)!=0)
+    throw std::runtime_error("Cannot seek WAV section");
+  const size_t frames=requestedFrames;
   audio.planes.assign(2,std::vector<float>(frames));
   unsigned char b[8];
   for(size_t n=0;n<frames;n++) {
@@ -170,6 +171,8 @@ struct OutputCleaner {
 };
 using OutputPtr=std::unique_ptr<const SherpaOnnxSourceSeparationOutput,OutputCleaner>;
 std::atomic<bool> busy{false};
+std::atomic<bool> cancelled{false};
+void checkCancel(){if(cancelled.load())throw std::runtime_error("Processing cancelled between sections");}
 void validateOutput(const SherpaOnnxSourceSeparationOutput* output,const std::string&label) {
   if(!output || output->num_stems!=2 || !output->stems)
     throw std::runtime_error(label+": separator returned no valid 2-stem output");
@@ -198,15 +201,16 @@ OutputPtr runModel(const std::string& model,int rate,int frames,const float*left
   validateOutput(result.get(),"MDX");
   return result;
 }
-void progress(JNIEnv*env,jobject target,int phase){
+void progress(JNIEnv*env,jobject target,int phase,int chunk,int total){
   if(!target)return;
   jclass cls=env->GetObjectClass(target);
-  if(!cls)throw std::runtime_error("Progress callback unavailable");
-  jmethodID method=env->GetMethodID(cls,"onProgress","(I)V");
-  if(method)env->CallVoidMethod(target,method,phase);
+  if(!cls)throw std::runtime_error("Progress listener unavailable");
+  jmethodID method=env->GetMethodID(cls,"onProgress","(III)V");
+  if(method)env->CallVoidMethod(target,method,phase,chunk,total);
   env->DeleteLocalRef(cls);
-  if(env->ExceptionCheck())throw std::runtime_error("Progress callback failed");
+  if(env->ExceptionCheck())throw std::runtime_error("Progress callback threw");
 }
+
 double outputSample(const SherpaOnnxSourceSeparationOutput*first,
   const SherpaOnnxSourceSeparationOutput*second,int role,int ch,uint32_t frame) {
   const bool up=(first->sample_rate==44100);
@@ -314,10 +318,10 @@ void javaError(JNIEnv *env, const std::string& msg) {
 extern "C" JNIEXPORT jobjectArray JNICALL
 Java_com_dennis_stemstudio_ThreeStemNative_separate(JNIEnv*env,jclass,
   jstring vocalModel,jstring drumModel,jstring wav,jstring folder,
-  jstring prefix,jint startSeconds,jobject listener){
+  jstring prefix,jint startSeconds,jint durationSeconds,jobject listener){
   try{
     const auto results=extract(env,jstr(env,vocalModel),jstr(env,drumModel),
-       jstr(env,wav),jstr(env,folder),jstr(env,prefix),int(startSeconds),listener);
+       jstr(env,wav),jstr(env,folder),jstr(env,prefix),int(startSeconds),int(durationSeconds),listener);
     jclass cls=env->FindClass("java/lang/String");
     if(!cls)return nullptr;
     jobjectArray values=env->NewObjectArray(4,cls,nullptr);
@@ -331,4 +335,9 @@ Java_com_dennis_stemstudio_ThreeStemNative_separate(JNIEnv*env,jclass,
     if(!env->ExceptionCheck())javaError(env,error.what());
     return nullptr;
   }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_dennis_stemstudio_ThreeStemNative_cancel(JNIEnv*,jclass){
+  cancelled.store(true);
 }
