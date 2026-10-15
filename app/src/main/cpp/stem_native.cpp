@@ -3,6 +3,7 @@
 // transparent and does not perform EQ, compression, denoising or loudness normalization.
 #include <jni.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -103,28 +104,80 @@ Audio loadWav(const std::string& name) {
   return audio;
 }
 
+// Source-separation models may generate 44.1 kHz audio. Stem Lab needs 48 kHz.
+// Polyphase windowed-sinc resampling is performed only for 44.1 -> 48 kHz,
+// without changing tempo, applying an EQ, or normalizing the stem amplitudes.
+struct QualityResampler48 {
+  static constexpr int kPhases=160;
+  static constexpr int kTaps=64;
+  std::array<std::array<double,kTaps>,kPhases> coefficients{};
+  QualityResampler48() {
+    constexpr double pi=3.1415926535897932384626433832795;
+    for(int p=0;p<kPhases;p++) {
+      const double frac=double(p)/double(kPhases);
+      double sum=0.0;
+      for(int t=0;t<kTaps;t++) {
+        const double x=double(t-31)-frac;
+        const double band=0.995;
+        const double sinc=std::abs(x)<1e-12 ? band : std::sin(pi*band*x)/(pi*x);
+        const double window=0.42+0.5*std::cos(pi*x/32.0)+0.08*std::cos(2.0*pi*x/32.0);
+        coefficients[p][t]=sinc*window;
+        sum+=coefficients[p][t];
+      }
+      if(std::abs(sum)<1e-8) throw std::runtime_error("Cannot initialize sample-rate filter");
+      for(auto& x:coefficients[p]) x/=sum;
+    }
+  }
+  uint32_t outputFrames(int32_t n) const {
+    return uint32_t((uint64_t(n)*160ULL+73ULL)/147ULL);
+  }
+  double at(const SherpaOnnxSourceSeparationStem& stem,int channel,uint32_t frame) const {
+    const uint64_t pos=uint64_t(frame)*147ULL;
+    const int64_t start=int64_t(pos/160ULL)-31LL;
+    const auto& weights=coefficients[pos%160ULL];
+    double value=0.0,weight=0.0;
+    for(int t=0;t<kTaps;t++) {
+      const int64_t index=start+t;
+      if(index<0 || index>=stem.n) continue;
+      value+=weights[t]*stem.samples[channel][index];
+      weight+=weights[t];
+    }
+    if(std::abs(weight)<1e-8) throw std::runtime_error("Resampling failed at WAV boundary");
+    return value/weight;
+  }
+};
+const QualityResampler48& resampler48() {
+  static const QualityResampler48 r{};
+  return r;
+}
+
 void savePcm24(const std::string& name, const SherpaOnnxSourceSeparationOutput *output,
                int stemIndex, float sharedGain) {
   const auto& s=output->stems[stemIndex];
-  if(s.num_channels<1 || s.num_channels>2 || s.n<1 || output->sample_rate<8000)
-    throw std::runtime_error("Separation produced invalid stem geometry");
-  const uint32_t frames=uint32_t(s.n);
-  const uint32_t bytes=frames*uint32_t(s.num_channels)*3U;
-  if(bytes>0xffffff00) throw std::runtime_error("Output exceeds standard WAV size limit");
+  if(s.num_channels<1 || s.num_channels>2 || s.n<1 ||
+     (output->sample_rate!=44100 && output->sample_rate!=48000))
+    throw std::runtime_error("Separation produced unsupported stem format");
+  const bool resample=output->sample_rate==44100;
+  const uint32_t rate=48000;
+  const uint32_t frames=resample ? resampler48().outputFrames(s.n) : uint32_t(s.n);
+  const uint64_t bytes64=uint64_t(frames)*uint32_t(s.num_channels)*3ULL;
+  if(bytes64>0xffffff00ULL) throw std::runtime_error("Output exceeds standard WAV size limit");
+  const uint32_t bytes=uint32_t(bytes64);
   FileHandle file(name,"wb"); FILE* f=file.get();
   fwrite("RIFF",1,4,f); write32(f,36U+bytes); fwrite("WAVE",1,4,f);
   fwrite("fmt ",1,4,f); write32(f,16); write16(f,1);
-  write16(f,uint16_t(s.num_channels)); write32(f,uint32_t(output->sample_rate));
-  write32(f,uint32_t(output->sample_rate)*uint32_t(s.num_channels)*3U);
+  write16(f,uint16_t(s.num_channels)); write32(f,rate);
+  write32(f,rate*uint32_t(s.num_channels)*3U);
   write16(f,uint16_t(s.num_channels*3)); write16(f,24);
   fwrite("data",1,4,f); write32(f,bytes);
   unsigned char sample[3];
   for(uint32_t n=0;n<frames;n++) {
     for(int ch=0;ch<s.num_channels;ch++) {
-      float x=s.samples[ch][n]*sharedGain;
+      const double source=resample ? resampler48().at(s,ch,n) : double(s.samples[ch][n]);
+      const double x=source*sharedGain;
       if(!std::isfinite(x)) throw std::runtime_error("Model produced invalid output sample");
-      double limited=std::max(-1.,std::min(0.99999988079, double(x)));
-      int32_t pcm=static_cast<int32_t>(std::lrint(limited*8388608.0));
+      const double limited=std::max(-1.,std::min(0.99999988079, x));
+      const int32_t pcm=static_cast<int32_t>(std::llrint(limited*8388608.0));
       sample[0]=uint8_t(pcm); sample[1]=uint8_t(pcm>>8); sample[2]=uint8_t(pcm>>16);
       if(fwrite(sample,1,3,f)!=3) throw std::runtime_error("Failed writing stem WAV");
     }
@@ -181,12 +234,27 @@ Java_com_dennis_stemstudio_NativeSeparator_separate(JNIEnv* env,jclass,
           }
         }
       }
+      if(output->sample_rate==44100) {
+        // True output-sample peak scan: one identical gain protects both stems
+        // from any overshoot introduced by interpolation.
+        for(int st=0;st<2;st++) {
+          const auto& stem=output->stems[st];
+          const uint32_t frames=resampler48().outputFrames(stem.n);
+          for(uint32_t frame=0;frame<frames;frame++) {
+            for(int ch=0;ch<stem.num_channels;ch++) {
+              const double x=resampler48().at(stem,ch,frame);
+              if(!std::isfinite(x)) throw std::runtime_error("Invalid resampling output");
+              maxPeak=std::max(maxPeak,float(std::abs(x)));
+            }
+          }
+        }
+      }
       float commonGain=maxPeak>0.9999f ? (0.9999f/maxPeak) : 1.f;
       std::string vocals=dir+"/"+prefix+"_Vocals_24bit.wav";
       std::string music=dir+"/"+prefix+"_Instrumental_24bit.wav";
       savePcm24(vocals,output,0,commonGain);
       savePcm24(music,output,1,commonGain);
-      std::string info="Completed: stereo 24-bit WAV, "+std::to_string(output->sample_rate)+" Hz";
+      std::string info="Completed: stereo 24-bit WAV, "+std::to_string(48000)+" Hz";
       if(commonGain<0.99999f) info+=" · Common anti-clipping gain " +std::to_string(20.0*log10(commonGain)).substr(0,6)+" dB";
       SherpaOnnxDestroySourceSeparationOutput(output);
       jclass cls=env->FindClass("java/lang/String");
