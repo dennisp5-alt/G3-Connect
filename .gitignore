@@ -2,5 +2,9 @@
 .idea/
 local.properties
 **/build/
-*.iml
+app/src/main/jniLibs/*/*.so
+app/src/main/cpp/sherpa-onnx/
+*.onnx
+*.wav
+*.apk
 .DS_Store
