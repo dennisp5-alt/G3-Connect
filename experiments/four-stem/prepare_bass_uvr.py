@@ -18,7 +18,7 @@ def main():
     args=ap.parse_args()
     if args.output.resolve()==args.input.resolve():
         raise SystemExit("Refusing to overwrite original model")
-    if args.input.name not in ("kuielab_a_basss.onnx","kuielab_b_basss.onnx"):
+    if args.input.name not in ("kuielab_b_bass.onnx",):
         raise SystemExit("Only known KUIELab bass models accepted")
     model=onnx.load(str(args.input))
     if len(model.graph.input)!=1 or len(model.graph.output)!=1:
@@ -33,7 +33,7 @@ def main():
         "model_type":"UVR",
         "model_name":args.input.stem,
         "sample_rate":44100,
-        "comment":"KUIELab MDX-Net basss specialist; prepared for sherpa UVR engine",
+        "comment":"KUIELab MDX-Net bass specialist; prepared for sherpa UVR engine",
         "n_fft":dims[2]*2,
         "center":1,
         "window_type":"hann",
