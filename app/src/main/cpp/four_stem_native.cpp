@@ -138,6 +138,27 @@ public:
     require(std::abs(weights)>1e-10,"Resampling boundary failure");
     return acc/weights;
   }
+  // Reuse phase-specific 64-tap sinc coefficients for disk-backed blocks.
+  // This avoids sin/cos work for every sample of a long song.
+  double valueWindow(const std::vector<float>&block,size_t startFrame,
+                     size_t wholeFrames,size_t outFrame)const {
+    const uint64_t pos=uint64_t(outFrame)*uint64_t(src);
+    const size_t center=size_t(pos/dst);
+    const size_t phase=(pos%dst)/std::gcd(src,dst);
+    const auto& coeff=kernels[phase];
+    double sum=0.0,validWeight=0.0;
+    for(int tap=0;tap<TAP;tap++){
+      const int64_t sourceFrame=int64_t(center)+tap-31;
+      if(sourceFrame<0 || uint64_t(sourceFrame)>=wholeFrames)continue;
+      require(size_t(sourceFrame)>=startFrame &&
+              size_t(sourceFrame)-startFrame<block.size(),
+              "Sinc read window was too short");
+      sum+=coeff[tap]*block[size_t(sourceFrame)-startFrame];
+      validWeight+=coeff[tap];
+    }
+    require(std::abs(validWeight)>1e-10,"Invalid resampler boundary");
+    return sum/validWeight;
+  }
   std::vector<float> convert(const std::vector<float>&srcSamples)const{
     const size_t n=count(srcSamples.size());
     std::vector<float> out(n);
@@ -289,32 +310,9 @@ public:
   }
 };
 
-double windowedSample(const SincResampler&resampler,const std::vector<float>&buf,
-       size_t sourceOffset,size_t wholeSource,size_t absoluteOutFrame,int srcRate,int dstRate){
-  const uint64_t pos=uint64_t(absoluteOutFrame)*uint64_t(srcRate);
-  const size_t at=size_t(pos/dstRate);
-  const size_t phase=(pos%dstRate)/std::gcd(srcRate,dstRate);
-  // SincResampler coefficients are private: allow absolute windows via a
-  // local interpolation using the same 64-tap Blackman window.
-  constexpr int TAPS=64;
-  constexpr double pi=3.14159265358979323846;
-  const double fc=0.985*std::min(1.,double(dstRate)/srcRate);
-  const double fraction=double(phase)/(dstRate/std::gcd(srcRate,dstRate));
-  double accumulated=0,weight=0;
-  for(int k=0;k<TAPS;k++){
-    const int64_t ix=int64_t(at)+k-31;
-    if(ix<0 || uint64_t(ix)>=wholeSource)continue;
-    require(size_t(ix)>=sourceOffset && size_t(ix)<sourceOffset+buf.size(),
-      "Resampler read window missing data");
-    const double x=k-31-fraction;
-    const double sinc=std::abs(x)<1.e-12?fc:std::sin(pi*fc*x)/(pi*x);
-    const double win=0.42+0.5*std::cos(pi*x/32.)+0.08*std::cos(2*pi*x/32.);
-    const double tap=sinc*win;
-    accumulated+=tap*buf[size_t(ix)-sourceOffset];
-    weight+=tap;
-  }
-  require(std::abs(weight)>1.e-10,"Resampling boundary failed");
-  return accumulated/weight;
+double windowedSample(const SincResampler&resampler,
+       const std::vector<float>&data,size_t offset,size_t whole,size_t index){
+  return resampler.valueWindow(data,offset,whole,index);
 }
 
 void loadModelChunk(StreamWav&input,size_t selectionStart,size_t selectedFrames,
@@ -337,8 +335,7 @@ void loadModelChunk(StreamWav&input,size_t selectionStart,size_t selectedFrames,
   for(int c=0;c<2;c++){
     for(size_t j=0;j<modelCount;j++){
       if((j&131071)==0)cancelledCheck();
-      mix[size_t(c)*SEGMENT+j]=float(windowedSample(down,b[c],start,selectedFrames,
-                                                modelStart+j,48000,44100));
+      mix[size_t(c)*SEGMENT+j]=float(windowedSample(down,b[c],start,selectedFrames,modelStart+j));
     }
   }
 }
@@ -436,8 +433,7 @@ void each48Block(FloatStem&source,size_t modelFrames,size_t outFrames,Callback&&
     std::vector<float> output(n*2);
     for(size_t j=0;j<n;j++){
       for(int c=0;c<2;c++){
-        const double value=windowedSample(up,b[c],start,modelFrames,
-                                          base+j,MODEL_RATE,OUTPUT_RATE);
+        const double value=windowedSample(up,b[c],start,modelFrames,base+j);
         require(std::isfinite(value),"Nonfinite 48 kHz output");
         output[j*2+c]=float(value);
       }
