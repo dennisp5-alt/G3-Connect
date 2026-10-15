@@ -167,7 +167,8 @@ struct OrtSessionHolder{
 void validateTensor(OrtSession*session,bool input){
   OrtTypeInfo*type=nullptr;
   ortCheck(input?api->SessionGetInputTypeInfo(session,0,&type):api->SessionGetOutputTypeInfo(session,0,&type));
-  const OrtTensorTypeAndShapeInfo*info=api->CastTypeInfoToTensorInfo(type);
+  const OrtTensorTypeAndShapeInfo*info=nullptr;
+  ortCheck(api->CastTypeInfoToTensorInfo(type,&info));
   require(info!=nullptr,"ONNX input/output must be tensors");
   ONNXTensorElementDataType elem;
   ortCheck(api->GetTensorElementType(info,&elem));
