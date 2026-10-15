@@ -25,7 +25,7 @@ def main():
         raise SystemExit("Model graph has unexpected I/O count")
     dims=[d.dim_value for d in model.graph.input[0].type.tensor_type.shape.dim]
     resultDims=[d.dim_value for d in model.graph.output[0].type.tensor_type.shape.dim]
-    if len(dims)!=4 or dims[1]!=4 or dims[2]!=2048 or dims[3]!=512:
+    if len(dims)!=4 or dims[1]!=4 or dims[2]!=2048 or dims[3]!=256:
         raise SystemExit(f"Unexpected MDX bass spectrogram graph: {dims}")
     if len(resultDims)!=4 or resultDims[1:]!=dims[1:]:
         raise SystemExit(f"Unexpected output spectrogram graph: {resultDims}")
