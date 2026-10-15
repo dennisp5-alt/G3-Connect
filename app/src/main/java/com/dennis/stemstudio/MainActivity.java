@@ -82,7 +82,14 @@ public class MainActivity extends Activity {
         scroll.addView(body);setContentView(scroll);
         body.addView(text("DENNIS  /  STEM STUDIO",12,AQUA,true));gap(body,10);
         heading=text("Hear every layer.",29,FG,true);body.addView(heading);
-        body.addView(text("Offline · Quality-first · 2-stem engine test",13,MUTE,false));gap(body,25);
+        body.addView(text("Offline · Quality-first · 2 or 3 stem extraction",13,MUTE,false));gap(body,14);
+        LinearLayout extra=panel(body);
+        extra.addView(text("TEST A NEW MODE",15,FG,true));gap(extra,8);
+        Button three=button("3 STEMS · Vocals / Drums / Other");extra.addView(three);
+        three.setOnClickListener(v->startActivity(new Intent(this,ThreeStemActivity.class)));
+        extra.addView(text("10-second preview · separate lightweight drum model",12,MUTE,false));
+        gap(body,16);
+        body.addView(text("OR USE THE ORIGINAL TWO-STEM MODE",12,AQUA,true));gap(body,12);
 
         LinearLayout p=panel(body);
         p.addView(text("01   Separation model",15,FG,true));gap(p,6);
@@ -121,7 +128,7 @@ public class MainActivity extends Activity {
             startActivityForResult(i,PICK_STEM_ZIP);
         });
         gap(body,18);
-        body.addView(text("TEST BUILD · Validate separation quality and device performance before expanding to four stems.",11,MUTE,false));
+        body.addView(text("The original 2-stem engine and sound processing are unchanged. The 3-stem experiment opens on a separate screen.",11,MUTE,false));
         refresh();
     }
     private void refresh(){

@@ -1,0 +1,63 @@
+name: Dennis Stem Studio Three-Stem Android Experiment
+on:
+  push:
+    branches:
+      - experiment/stem-studio-three-stem-feasibility
+    paths:
+      - 'app/**'
+      - 'scripts/prepare_native.sh'
+      - 'experiments/three-stem/prepare_drum_uvr.py'
+      - '.github/workflows/three-stem-android.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build-three-stem:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Android SDK and pinned native runtime
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-35" "build-tools;35.0.0" "cmake;3.22.1" "ndk;27.2.12479018"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          bash scripts/prepare_native.sh
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Assemble isolated experimental Android APK
+        run: gradle --no-daemon :app:assembleDebug
+      - name: Build prepared KUIELab B drum model for the experimental mode
+        run: |
+          python -m pip install --disable-pip-version-check onnx
+          mkdir -p /tmp/models prepared-model
+          curl -fLsS --retry 3 --retry-delay 2 \
+            "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/kuielab_b_drums.onnx?download=true" \
+            -o /tmp/models/kuielab_b_drums.onnx
+          echo "a6fecee758059b33ed99f6dabba297439b3e7cacfac4b1097bd324aff8052208  /tmp/models/kuielab_b_drums.onnx" | sha256sum --check
+          python experiments/three-stem/prepare_drum_uvr.py \
+            --input /tmp/models/kuielab_b_drums.onnx \
+            --output prepared-model/kuielab_b_drums_sherpa.onnx
+          sha256sum prepared-model/kuielab_b_drums_sherpa.onnx
+      - name: Upload experimental APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DennisStemStudio-v0.1.2-ThreeStem-EXPERIMENT
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload compatible KUIELab B drum model
+        uses: actions/upload-artifact@v4
+        with:
+          name: DennisStemStudio-KUIELabB-Drum-Model-Prepared
+          path: prepared-model/kuielab_b_drums_sherpa.onnx
+          if-no-files-found: error
+          retention-days: 30

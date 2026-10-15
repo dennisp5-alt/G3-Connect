@@ -8,3 +8,9 @@ set_target_properties(sherpa-c-api PROPERTIES IMPORTED_LOCATION
 add_library(dennisstem SHARED stem_native.cpp)
 target_include_directories(dennisstem PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(dennisstem sherpa-c-api log)
+
+# Experimental three-stem model path reuses pinned sherpa-onnx engine.
+# Original two-stem native library remains unchanged.
+add_library(dennisthree SHARED three_stem_native.cpp)
+target_include_directories(dennisthree PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(dennisthree sherpa-c-api log)
