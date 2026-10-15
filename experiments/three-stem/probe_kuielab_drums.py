@@ -63,7 +63,7 @@ def probe(path, threads):
     if len(inp.shape) != 4:
         raise RuntimeError(f"Input tensor must be rank-4, got {inp.shape}")
     shape = [1 if not isinstance(n, int) or n < 1 else n for n in inp.shape]
-    if shape[0] != 1 or np.prod(shape) > 4_000_000 or np.prod(shape) < 256:
+    if shape[0] != 1 or np.prod(shape) > 8_000_000 or np.prod(shape) < 256:
         raise RuntimeError(f"Unsafe/invalid input tensor shape: {shape}")
     seed = np.random.default_rng(3405)
     data = seed.standard_normal(tuple(shape)).astype(

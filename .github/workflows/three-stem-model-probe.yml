@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Prepare minimal ONNX host runtime
-        run: python -m pip install --disable-pip-version-check numpy onnxruntime
+        run: python -m pip install --disable-pip-version-check numpy onnxruntime onnx 'sherpa-onnx==1.13.8'
       - name: Download two genuine drum models
         run: |
           set -euo pipefail
@@ -36,6 +36,16 @@ jobs:
       - name: Probe KUIELab B drum tensors and host inference
         if: always()
         run: python experiments/three-stem/probe_kuielab_drums.py --model /tmp/drums/kuielab_b_drums.onnx --threads 2 --report reports/kuielab_b_drums_host.json
+      - name: Add tested UVR metadata to B drum specialist
+        run: |
+          python experiments/three-stem/prepare_drum_uvr.py \
+            --input /tmp/drums/kuielab_b_drums.onnx \
+            --output /tmp/drums/kuielab_b_drums_sherpa.onnx
+      - name: Test B drums via existing sherpa-onnx source-separation interface
+        run: |
+          python experiments/three-stem/test_sherpa_drum_model.py \
+            --model /tmp/drums/kuielab_b_drums_sherpa.onnx \
+            --report reports/kuielab_b_sherpa_host.json
       - name: Save source-model feasibility reports
         if: always()
         uses: actions/upload-artifact@v4
