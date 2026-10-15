@@ -27,18 +27,21 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
+import java.util.zip.Deflater;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
-    private static final int PICK_AUDIO=1, PICK_MODEL=2, PICK_EXPORT=3;
+    private static final int PICK_AUDIO=1, PICK_MODEL=2, PICK_EXPORT=3, PICK_STEM_ZIP=4;
     private static final int BG=Color.rgb(14,18,24), PANEL=Color.rgb(27,34,43);
     private static final int FG=Color.rgb(242,247,250), MUTE=Color.rgb(153,169,181);
     private static final int AQUA=Color.rgb(97,207,212);
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
     private final Handler main=new Handler(Looper.getMainLooper());
     private TextView modelText, audioText, statusText, heading;
-    private Button importAudio, importModel, separate, vocals, music, export;
+    private Button importAudio, importModel, separate, vocals, music, export, exportZip;
     private ProgressBar spinner;
     private File audioFile, modelFile;
     private String[] stemPaths;
@@ -95,7 +98,7 @@ public class MainActivity extends Activity {
         gap(body,13);
 
         p=panel(body);p.addView(text("03   Separate",15,FG,true));gap(p,8);
-        p.addView(text("Vocals + instrumental, processed locally on your phone. No EQ, compression or loudness processing.",13,MUTE,false));
+        p.addView(text("Vocals + instrumental, processed locally. Clean 48 kHz/24-bit stereo exports for Stem Lab; no EQ, compression or loudness processing.",13,MUTE,false));
         gap(p,12);separate=button("Separate audio · Highest quality");p.addView(separate);
         separate.setOnClickListener(v->runSeparation());
         spinner=new ProgressBar(this);spinner.setVisibility(View.GONE);
@@ -106,8 +109,17 @@ public class MainActivity extends Activity {
         vocals=button("▶  Audition vocals");p.addView(vocals);
         music=button("▶  Audition instrumental");p.addView(music);
         export=button("Export both WAV stems");p.addView(export);
+        exportZip=button("Export Stem Lab ZIP · 48 kHz");p.addView(exportZip);
         vocals.setOnClickListener(v->play(0));music.setOnClickListener(v->play(1));
         export.setOnClickListener(v->{Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);startActivityForResult(i,PICK_EXPORT);});
+        exportZip.setOnClickListener(v->{
+            Intent i=new Intent(Intent.ACTION_CREATE_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("application/zip");
+            String label=audioFile==null?"Song":safeName(audioFile.getName());
+            i.putExtra(Intent.EXTRA_TITLE,label+"_Stems_48kHz_24bit.zip");
+            startActivityForResult(i,PICK_STEM_ZIP);
+        });
         gap(body,18);
         body.addView(text("TEST BUILD · Validate separation quality and device performance before expanding to four stems.",11,MUTE,false));
         refresh();
@@ -119,7 +131,7 @@ public class MainActivity extends Activity {
         importModel.setEnabled(!busy);importAudio.setEnabled(!busy);
         separate.setEnabled(!busy && modelFile!=null && audioFile!=null);
         boolean ready=!busy && stemPaths!=null && stemPaths.length>=2;
-        vocals.setEnabled(ready);music.setEnabled(ready);export.setEnabled(ready);
+        vocals.setEnabled(ready);music.setEnabled(ready);export.setEnabled(ready);exportZip.setEnabled(ready);
         spinner.setVisibility(busy?View.VISIBLE:View.GONE);
     }
     private void picker(int request,String type){
@@ -148,6 +160,7 @@ public class MainActivity extends Activity {
         if(result!=RESULT_OK || intent==null || intent.getData()==null)return;
         Uri selected=intent.getData();
         if(request==PICK_EXPORT){exportFolder(selected);return;}
+        if(request==PICK_STEM_ZIP){exportStemZip(selected);return;}
         if(busy)return;
         boolean isModel=request==PICK_MODEL;
         String chosen=displayName(selected);
@@ -233,9 +246,38 @@ public class MainActivity extends Activity {
                         while((n=in.read(buf))!=-1)out.write(buf,0,n);
                     }
                 }
-                main.post(()->state(false,"Exported both 24-bit stereo WAV stems to selected folder."));
+                main.post(()->state(false,"Exported 48 kHz 24-bit stereo WAV stems to selected folder."));
             }catch(Throwable t){onFailure("Export failed (check folder for partial files)",t);}
         });
     }
+    private void exportStemZip(Uri uri){
+        if(stemPaths==null || busy || stemPaths.length<2)return;
+        String[] paths=stemPaths.clone();
+        state(true,"Creating Stem Lab ZIP · 48 kHz / 24-bit…");
+        worker.execute(()->{
+            try{
+                try(OutputStream stream=getContentResolver().openOutputStream(uri,"w")){
+                    if(stream==null)throw new IOException("Cannot write selected ZIP");
+                    try(ZipOutputStream zip=new ZipOutputStream(stream)){
+                        zip.setLevel(Deflater.BEST_SPEED);
+                        byte[] buffer=new byte[131072];
+                        for(int i=0;i<2;i++){
+                            File source=new File(paths[i]);
+                            if(!source.isFile())throw new IOException("Missing stem "+source.getName());
+                            zip.putNextEntry(new ZipEntry(source.getName()));
+                            try(InputStream in=new FileInputStream(source)){
+                                int n;
+                                while((n=in.read(buffer))!=-1)zip.write(buffer,0,n);
+                            }
+                            zip.closeEntry();
+                        }
+                        zip.finish();
+                    }
+                }
+                main.post(()->state(false,"Stem Lab ZIP exported: 48 kHz · stereo · 24-bit PCM."));
+            } catch(Throwable t){onFailure("ZIP export failed (delete incomplete ZIP)",t);}
+        });
+    }
+
     @Override protected void onDestroy(){stopPlayer();worker.shutdown();super.onDestroy();}
 }
