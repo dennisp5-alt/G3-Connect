@@ -29,15 +29,20 @@ def main():
         raise SystemExit(f"Unexpected MDX bass spectrogram graph: {dims}")
     if len(resultDims)!=4 or resultDims[1:]!=dims[1:]:
         raise SystemExit(f"Unexpected output spectrogram graph: {resultDims}")
+    # KUIELab's official Leaderboard_B ConvTDFNet_bass.yaml:
+    # n_fft = win_length = 16384, dim_f = 2048, dim_t = 256.
+    # The ONNX 2048 frequency-bin axis is a CROPPED STFT spectrum;
+    # n_fft != 2*dim_f for bass. Using 4096 causes thin, almost bassless output.
+    # https://github.com/kuielab/mdx-net/blob/Leaderboard_B/configs/model/ConvTDFNet_bass.yaml
     meta={
         "model_type":"UVR",
         "model_name":args.input.stem,
         "sample_rate":44100,
         "comment":"KUIELab MDX-Net bass specialist; prepared for sherpa UVR engine",
-        "n_fft":dims[2]*2,
+        "n_fft":16384,
         "center":1,
         "window_type":"hann",
-        "win_length":dims[2]*2,
+        "win_length":16384,
         "hop_length":1024,
         "dim_t":dims[3],
         "dim_f":dims[2],
@@ -52,6 +57,11 @@ def main():
     onnx.save(model,str(args.output))
     checked=onnx.load(str(args.output))
     onnx.checker.check_model(checked)
+    actual=dict((m.key,m.value) for m in checked.metadata_props)
+    if actual.get("n_fft")!="16384" or actual.get("win_length")!="16384":
+        raise SystemExit("Bass FFT metadata validation failed")
+    if actual.get("dim_f")!="2048" or actual.get("dim_t")!="256":
+        raise SystemExit("Bass model graph metadata validation failed")
     print(f"Metadata OK, saved {args.output} with KUIELab bass target (not vocals): {meta}")
 
 

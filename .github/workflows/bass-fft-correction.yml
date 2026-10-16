@@ -1,0 +1,65 @@
+name: Dennis Stem Studio Bass FFT Correction
+on:
+  push:
+    branches:
+      - experiment/stem-studio-fourstem-bass-fix-v015
+    paths:
+      - 'experiments/four-stem/**'
+      - '.github/workflows/bass-fft-correction.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  bass-model:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Prepare dependencies
+        run: python -m pip install --disable-pip-version-check onnx numpy 'sherpa-onnx==1.13.8'
+      - name: Download and authenticate upstream KUIELab B bass specialist
+        run: |
+          mkdir -p /tmp/bass corrected reports
+          curl -fLsS --retry 3 --retry-delay 2 \
+            "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/kuielab_b_bass.onnx?download=true" \
+            -o /tmp/bass/kuielab_b_bass.onnx
+          echo "b4b7080fe501d0bece62076c5d4eda4d6590c5207ed78ec84a57bac0740a061d  /tmp/bass/kuielab_b_bass.onnx" | sha256sum --check
+      - name: Apply authentic KUIELab bass STFT parameters
+        run: |
+          python experiments/four-stem/prepare_bass_uvr.py \
+            --input /tmp/bass/kuielab_b_bass.onnx \
+            --output corrected/kuielab_b_bass_sherpa.onnx
+          python - <<'PY'
+          import onnx
+          m=onnx.load("corrected/kuielab_b_bass_sherpa.onnx")
+          d={x.key:x.value for x in m.metadata_props}
+          assert d["n_fft"] == "16384", d
+          assert d["win_length"] == "16384", d
+          assert d["dim_f"] == "2048", d
+          assert d["dim_t"] == "256", d
+          print("VERIFIED ORIGINAL KUIELab bass FFT parameters",d)
+          PY
+          sha256sum corrected/kuielab_b_bass_sherpa.onnx
+      - name: Test actual sherpa-onnx bass signal inference (not just model loading)
+        run: |
+          python experiments/three-stem/test_sherpa_drum_model.py \
+            --model corrected/kuielab_b_bass_sherpa.onnx \
+            --report reports/bass_fft16384_sherpa_cpu_host.json
+      - name: Publish corrected importable model
+        uses: actions/upload-artifact@v4
+        with:
+          name: DennisStemStudio-BassModel-FFT16384-CORRECTED
+          path: corrected/kuielab_b_bass_sherpa.onnx
+          if-no-files-found: error
+          retention-days: 30
+      - name: Publish host compatibility report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: DennisStemStudio-BassModel-FFT16384-HostTest
+          path: reports/*.json
+          if-no-files-found: warn
+          retention-days: 30
