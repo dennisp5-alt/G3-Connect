@@ -50,6 +50,7 @@ public final class FourStemActivity extends Activity {
     private static final String[] LABELS={"Vocals","Drums","Bass","Other"};
     private static final int[] START={0,60,0,0,30,60,90,120,180};
     private static final int[] DURATIONS={0,60,60,10,10,10,10,10,10};
+    private static final int[] THREADS={4,2,5,6};
     private static final String PREFERENCES="four_stem_diagnostics";
     private static final String DRUM_FILENAME="kuielab_b_drums_sherpa.onnx";
     private static final String BASS_FILENAME="kuielab_b_bass_sherpa.onnx";
@@ -61,6 +62,7 @@ public final class FourStemActivity extends Activity {
     private Button vocalButton,drumButton,bassButton,wavButton,separate,cancel,exportZip,exportWavs;
     private Button[] preview=new Button[4];
     private ProgressBar progress;
+    private Spinner threadChoice;
     private Spinner section;
     private boolean busy=false;
     private boolean extracting=false;
@@ -181,7 +183,13 @@ public final class FourStemActivity extends Activity {
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         section.setAdapter(adapter);section.setSelection(5);
         p.addView(section,new LinearLayout.LayoutParams(-1,dp(48)));
-        separate=button("Separate 3 stems · Start");p.addView(separate);
+        threadChoice=new Spinner(this);
+        ArrayAdapter<String> threadAdapter=new ArrayAdapter<>(this,android.R.layout.simple_spinner_item,
+            new String[]{"4 threads · suggested start","2 threads · same as v0.1.4","5 threads","6 threads"});
+        threadAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        threadChoice.setAdapter(threadAdapter);
+        p.addView(threadChoice,new LinearLayout.LayoutParams(-1,dp(48)));
+        separate=button("Separate 4 stems · Start");p.addView(separate);
         cancel=button("Cancel after current AI section");p.addView(cancel);
         cancel.setOnClickListener(v->{
             FourStemNative.cancel();
@@ -349,6 +357,7 @@ public final class FourStemActivity extends Activity {
         stopPlayer();stems=null;
         final int mode=Math.max(0,Math.min(section.getSelectedItemPosition(),START.length-1));
         final int start=START[mode],duration=DURATIONS[mode];
+        final int threads=THREADS[Math.max(0,Math.min(threadChoice.getSelectedItemPosition(),THREADS.length-1))];
         final String name=safe(wav.getName())+
             (duration==0?"_4StemFull":duration==60?"_4Stem60s"+start:"_4Stem10s"+start);
         File base=getExternalFilesDir(null)==null?getFilesDir():getExternalFilesDir(null);
@@ -378,17 +387,19 @@ public final class FourStemActivity extends Activity {
                 try{
                     result=FourStemNative.separate(
                         vocal.getAbsolutePath(),drum.getAbsolutePath(),bass.getAbsolutePath(),wav.getAbsolutePath(),
-                        directory.getAbsolutePath(),name,start,duration,
+                        directory.getAbsolutePath(),name,start,duration,threads,
                         (phase,chunk,total)->main.post(()->{
                             if(!extracting)return;
                             int percent;
                             String next;
-                            if(phase<4){
-                                percent=(int)((chunk*4.0+phase)*82.0/(total*4.0));
-                                next="Section "+(chunk+1)+"/"+total+" · "+
-                                    (phase==0?"separating vocals":
-                                     phase==1?"separating drums":
-                                     phase==2?"separating bass":"aligning and saving audio");
+                            if(phase<3){
+                                percent=(int)((phase+chunk/(double)total)*27);
+                                next=(phase==0?"Pass 1 of 3 · vocals":
+                                      phase==1?"Pass 2 of 3 · drums":"Pass 3 of 3 · bass")+
+                                    " · section "+(chunk+1)+"/"+total;
+                            }else if(phase==3){
+                                percent=81+(int)(3.0*chunk/total);
+                                next="Joining section "+(chunk+1)+"/"+total;
                             }else if(phase==4){
                                 percent=84+4*chunk;
                                 next="Final WAV export "+(chunk+1)+"/4";

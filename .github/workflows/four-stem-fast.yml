@@ -1,0 +1,89 @@
+name: Dennis Stem Studio v0.1.6 Four-Stem Fast
+on:
+  push:
+    branches:
+      - experiment/stem-studio-four-stem-fast-v016
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Prepare the three models
+        run: |
+          python -m pip install --disable-pip-version-check onnx numpy 'sherpa-onnx==1.13.8'
+          mkdir -p /tmp/raw models
+          curl -fLsS --retry 3 "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/kuielab_b_bass.onnx?download=true" -o /tmp/raw/bass.onnx
+          curl -fLsS --retry 3 "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/kuielab_b_drums.onnx?download=true" -o /tmp/raw/drums.onnx
+          curl -fLsS --retry 3 "https://github.com/k2-fsa/sherpa-onnx/releases/download/source-separation-models/UVR_MDXNET_9482.onnx" -o models/UVR_MDXNET_9482.onnx
+          echo "b4b7080fe501d0bece62076c5d4eda4d6590c5207ed78ec84a57bac0740a061d  /tmp/raw/bass.onnx" | sha256sum --check
+          echo "a6fecee758059b33ed99f6dabba297439b3e7cacfac4b1097bd324aff8052208  /tmp/raw/drums.onnx" | sha256sum --check
+          python experiments/four-stem/prepare_bass_uvr.py --input /tmp/raw/bass.onnx --output models/kuielab_b_bass_sherpa.onnx
+          python experiments/three-stem/prepare_drum_uvr.py --input /tmp/raw/drums.onnx --output models/kuielab_b_drums_sherpa.onnx
+          sha256sum models/*
+      - name: Build the old and new engines for this computer
+        run: |
+          V=1.13.8
+          curl -fLsS --retry 3 "https://github.com/k2-fsa/sherpa-onnx/releases/download/v$V/sherpa-onnx-v$V-linux-x64-shared.tar.bz2" -o /tmp/sherpa.tar.bz2
+          mkdir -p /tmp/sherpa && tar -xjf /tmp/sherpa.tar.bz2 -C /tmp/sherpa --strip-components=1
+          find /tmp/sherpa -name 'libsherpa-onnx-c-api*' | head
+          H=$(find /tmp/sherpa -name c-api.h | head -1)
+          mkdir -p /tmp/inc/sherpa-onnx/c-api && cp "$H" /tmp/inc/sherpa-onnx/c-api/
+          B=experiments/four-stem/bench
+          git show origin/experiment/stem-studio-fourstem-bass-fix-v015:app/src/main/cpp/four_stem_sequential_native.cpp > $B/old_engine.cpp
+          L=$(dirname "$(find /tmp/sherpa -name 'libsherpa-onnx-c-api*' | head -1)")
+          for x in old new; do
+            g++ -std=c++17 -O3 -I/tmp/inc -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" $B/bench_$x.cpp -o /tmp/bench_$x -L"$L" -lsherpa-onnx-c-api -Wl,-rpath,"$L"
+          done
+      - name: Time old and new on the same 60 seconds
+        run: |
+          B=experiments/four-stem/bench
+          python $B/make_song.py /tmp/song.wav 70
+          M=models
+          nproc
+          mkdir -p /tmp/old /tmp/new2 /tmp/new4
+          /tmp/bench_old $M/UVR_MDXNET_9482.onnx $M/kuielab_b_drums_sherpa.onnx $M/kuielab_b_bass_sherpa.onnx /tmp/song.wav /tmp/old song 60 | tee -a timings.txt
+          /tmp/bench_new $M/UVR_MDXNET_9482.onnx $M/kuielab_b_drums_sherpa.onnx $M/kuielab_b_bass_sherpa.onnx /tmp/song.wav /tmp/new2 song 60 2 | tee -a timings.txt
+          /tmp/bench_new $M/UVR_MDXNET_9482.onnx $M/kuielab_b_drums_sherpa.onnx $M/kuielab_b_bass_sherpa.onnx /tmp/song.wav /tmp/new4 song 60 4 | tee -a timings.txt
+          python $B/compare.py /tmp/old /tmp/new2 song song | tee -a timings.txt
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Build the APK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-35" "build-tools;35.0.0" "cmake;3.22.1" "ndk;27.2.12479018"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018
+          bash scripts/prepare_native.sh
+          gradle --no-daemon :app:assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DennisStemStudio-v0.1.6-FourStem-Fast
+          path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DennisStemStudio-v0.1.6-Three-Models
+          path: models/*.onnx
+          retention-days: 30
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: DennisStemStudio-v0.1.6-Timings
+          path: timings.txt
+          if-no-files-found: warn

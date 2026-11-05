@@ -9,7 +9,7 @@ final class FourStemNative {
     }
     interface Progress { void onProgress(int phase, int chunk, int total); }
     static native String[] separate(String vocalModel, String drumModel, String bassModel, String wav,
-       String directory, String prefix, int startSeconds, int durationSeconds, Progress callback);
+       String directory, String prefix, int startSeconds, int durationSeconds, int threads, Progress callback);
     static native void cancel();
     private FourStemNative() {}
 }

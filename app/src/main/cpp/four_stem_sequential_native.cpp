@@ -13,6 +13,7 @@
 #include <string>
 #include <memory>
 #include <atomic>
+#include <chrono>
 #include <vector>
 #include <sys/statvfs.h>
 #include "sherpa-onnx/c-api/c-api.h"
@@ -142,7 +143,7 @@ struct QualityResampler48 {
   uint32_t outputFrames(int32_t n) const {
     return uint32_t((uint64_t(n)*160ULL+73ULL)/147ULL);
   }
-  double at(const SherpaOnnxSourceSeparationStem& stem,int channel,uint32_t frame) const {
+  template<class Stem> double at(const Stem& stem,int channel,uint32_t frame) const {
     const uint64_t pos=uint64_t(frame)*147ULL;
     const int64_t start=int64_t(pos/160ULL)-31LL;
     const auto& weights=coefficients[pos%160ULL];
@@ -186,20 +187,33 @@ void validateOutput(const SherpaOnnxSourceSeparationOutput* output,const std::st
   if(output->stems[0].n!=output->stems[1].n)
     throw std::runtime_error(label+": unequal stem lengths");
 }
-OutputPtr runModel(const std::string& model,int rate,int frames,const float*left,const float*right) {
-  SherpaOnnxOfflineSourceSeparationConfig config{};
-  config.model.uvr.model=model.c_str();
-  config.model.num_threads=2;
-  config.model.provider="cpu";
-  auto*engine=SherpaOnnxCreateOfflineSourceSeparation(&config);
-  if(!engine)throw std::runtime_error("Could not load model. Use a compatible metadata-prepared MDX ONNX file.");
-  const float*channels[]{left,right};
-  auto*output=SherpaOnnxOfflineSourceSeparationProcess(engine,channels,2,frames,rate);
-  SherpaOnnxDestroyOfflineSourceSeparation(engine);
-  OutputPtr result(output);
-  if(!result)throw std::runtime_error("Separation failed or phone ran out of memory");
-  validateOutput(result.get(),"MDX");
-  return result;
+// One model stays loaded for a whole pass. Loading it again for every section cost
+// more than three loads per section and gained nothing.
+class Engine {
+public:
+  Engine(const std::string& model,int threads){
+    SherpaOnnxOfflineSourceSeparationConfig config{};
+    config.model.uvr.model=model.c_str();
+    config.model.num_threads=threads;
+    config.model.provider="cpu";
+    engine=SherpaOnnxCreateOfflineSourceSeparation(&config);
+    if(!engine)throw std::runtime_error("Could not load model. Use a compatible metadata-prepared MDX ONNX file.");
+  }
+  ~Engine(){SherpaOnnxDestroyOfflineSourceSeparation(engine);}
+  Engine(const Engine&)=delete;
+  Engine&operator=(const Engine&)=delete;
+  OutputPtr run(int rate,int frames,const float*left,const float*right){
+    const float*channels[]{left,right};
+    OutputPtr result(SherpaOnnxOfflineSourceSeparationProcess(engine,channels,2,frames,rate));
+    if(!result)throw std::runtime_error("Separation failed or phone ran out of memory");
+    validateOutput(result.get(),"MDX");
+    return result;
+  }
+private:
+  decltype(SherpaOnnxCreateOfflineSourceSeparation(nullptr)) engine;
+};
+double secondsSince(std::chrono::steady_clock::time_point t){
+  return std::chrono::duration<double>(std::chrono::steady_clock::now()-t).count();
 }
 void progress(JNIEnv*env,jobject target,int phase,int chunk,int total){
   if(!target)return;
@@ -211,51 +225,60 @@ void progress(JNIEnv*env,jobject target,int phase,int chunk,int total){
   if(env->ExceptionCheck())throw std::runtime_error("Progress callback threw");
 }
 
-double outputSample(const SherpaOnnxSourceSeparationOutput*first,
-  const SherpaOnnxSourceSeparationOutput*second,int role,int ch,uint32_t frame) {
-  const bool up=(first->sample_rate==44100);
-  auto read=[&](const SherpaOnnxSourceSeparationStem&stem)->double{
-    return up?resampler48().at(stem,ch,frame):double(stem.samples[ch][frame]);
-  };
-  if(role==0)return read(first->stems[0]);
-  const double drums=read(second->stems[0]);
-  if(role==1)return drums;
-  return read(first->stems[1])-drums;
-}
-void writeThreeStem24(const std::string&path,const SherpaOnnxSourceSeparationOutput*first,
-       const SherpaOnnxSourceSeparationOutput*second,int role,float sharedGain,uint32_t frames) {
-  const uint64_t bytes64=uint64_t(frames)*6;
-  if(bytes64>0xffffff00ULL)throw std::runtime_error("WAV is too large");
-  FileHandle file(path,"wb");FILE*f=file.get();
-  const uint32_t bytes=uint32_t(bytes64);
-  fwrite("RIFF",1,4,f);write32(f,36U+bytes);fwrite("WAVEfmt ",1,8,f);write32(f,16);
-  write16(f,1);write16(f,2);write32(f,48000);write32(f,48000*6);
-  write16(f,6);write16(f,24);
-  fwrite("data",1,4,f);write32(f,bytes);
-  unsigned char sample[3];
-  for(uint32_t i=0;i<frames;i++){
-    for(int ch=0;ch<2;ch++){
-      double x=outputSample(first,second,role,ch,i)*sharedGain;
-      if(!std::isfinite(x))throw std::runtime_error("Model produced invalid samples");
-      x=std::max(-1.,std::min(0.99999988079,x));
-      int32_t pcm=static_cast<int32_t>(std::llrint(x*8388608.));
-      sample[0]=uint8_t(pcm);sample[1]=uint8_t(pcm>>8);sample[2]=uint8_t(pcm>>16);
-      if(fwrite(sample,1,3,f)!=3)throw std::runtime_error("Insufficient storage writing WAV");
-    }
-  }
-  if(fflush(f)!=0||ferror(f))throw std::runtime_error("WAV export failed");
-}
+// 18-second sections were proven on the phone by the 3-stem build. Only one model is
+// in memory at a time, and each section now spends 11% on context instead of 33%.
+constexpr size_t CHUNK_SECONDS=18, PAD_SECONDS=1, BLEND48=4800;
 
-constexpr size_t CHUNK_SECONDS=6, PAD_SECONDS=1, BLEND48=4800;
-// Bass MDX uses 512 spectrogram frames. Small chunks restrict live buffers.
+// A stereo model-rate track saved section by section between passes.
+class Track {
+public:
+  explicit Track(std::string where):path(std::move(where)){
+    file=fopen(path.c_str(),"w+b");
+    if(!file)throw std::runtime_error("Cannot create temporary pass file");
+  }
+  ~Track(){if(file)fclose(file);std::remove(path.c_str());}
+  Track(const Track&)=delete;
+  Track&operator=(const Track&)=delete;
+  template<class Stem> void put(const Stem& stem){put(stem.samples[0],stem.samples[1],stem.n);}
+  void put(const float*left,const float*right,int n){
+    if(fseeko(file,0,SEEK_END)!=0)throw std::runtime_error("Pass file seek failed");
+    where.push_back(ftello(file));
+    sizes.push_back(n);
+    if(fwrite(left,sizeof(float),n,file)!=size_t(n)||fwrite(right,sizeof(float),n,file)!=size_t(n))
+      throw std::runtime_error("Scratch storage full");
+  }
+  void get(size_t section,std::vector<float>&left,std::vector<float>&right){
+    if(section>=sizes.size())throw std::runtime_error("Missing section in pass file");
+    const size_t n=size_t(sizes[section]);
+    left.resize(n);right.resize(n);
+    if(fflush(file)!=0||fseeko(file,where[section],SEEK_SET)!=0)throw std::runtime_error("Pass file seek failed");
+    if(fread(left.data(),sizeof(float),n,file)!=n||fread(right.data(),sizeof(float),n,file)!=n)
+      throw std::runtime_error("Pass file is incomplete");
+  }
+private:
+  std::string path;
+  FILE*file=nullptr;
+  std::vector<off_t> where;
+  std::vector<int> sizes;
+};
+struct View {
+  int n=0;
+  const float*samples[2]{nullptr,nullptr};
+};
+View view(const std::vector<float>&left,const std::vector<float>&right){
+  View v;v.n=int(left.size());v.samples[0]=left.data();v.samples[1]=right.data();
+  return v;
+}
 struct Scratch {
   std::array<std::string,4> raw{},partial{},finals{};
+  std::string base;
   std::array<FILE*,4> fp{};
   std::array<std::vector<float>,4> tail{};
   size_t pending=0,written=0;
   double peak=0;
   Scratch(const std::string&folder,const std::string&prefix){
     const char*names[]{"Vocals","Drums","Bass","Other"};
+    base=folder+"/"+prefix;
     for(int i=0;i<4;i++){
       raw[i]=folder+"/"+prefix+"_"+names[i]+".floatpart";
       finals[i]=folder+"/"+prefix+"_"+names[i]+"_24bit.wav";
@@ -314,20 +337,20 @@ struct Scratch {
     }
   }
 };
-std::array<std::vector<float>,4> render(const SherpaOnnxSourceSeparationOutput*voice,
-     const SherpaOnnxSourceSeparationOutput*drum,
-     const SherpaOnnxSourceSeparationOutput*bass,size_t local48,size_t frames){
+std::array<std::vector<float>,4> render(const View&voice,const View&instrumental,const View&drum,const View&bass,
+     int rate,size_t local48,size_t frames){
   std::array<std::vector<float>,4> result;
   for(auto&v:result)v.resize(frames*2);
+  const bool up=rate==44100;
+  auto read=[&](const View&stem,int c,uint32_t frame)->double{
+    return up?resampler48().at(stem,c,frame):double(stem.samples[c][frame]);
+  };
   for(size_t i=0;i<frames;i++){
     if((i&65535)==0)checkCancel();
+    const uint32_t at=uint32_t(local48+i);
     for(int c=0;c<2;c++){
-      const double vocal=outputSample(voice,drum,0,c,uint32_t(local48+i));
-      const double drums=outputSample(voice,drum,1,c,uint32_t(local48+i));
-      const double bassValue=bass->sample_rate==44100?
-          resampler48().at(bass->stems[0],c,uint32_t(local48+i)):
-          double(bass->stems[0].samples[c][local48+i]);
-      const double other=outputSample(voice,drum,2,c,uint32_t(local48+i))-bassValue;
+      const double vocal=read(voice,c,at),drums=read(drum,c,at),bassValue=read(bass,c,at);
+      const double other=read(instrumental,c,at)-drums-bassValue;
       const double x[]{vocal,drums,bassValue,other};
       for(int s=0;s<4;s++){
         if(!std::isfinite(x[s]))throw std::runtime_error("Nonfinite separated sample");
@@ -351,12 +374,13 @@ void writeHeader(FILE*f,size_t frames){
 std::array<std::string,5> extract(JNIEnv*env,
   const std::string&vocalModel,const std::string&drumModel,const std::string&wav,
   const std::string&folder,const std::string&prefix,const std::string&bassModel,int start,
-  int duration,jobject callback){
+  int duration,int threads,jobject callback){
   if(busy.exchange(true))throw std::runtime_error("Already separating three stems");
   struct Guard{~Guard(){busy.store(false);cancelled.store(false);}}guard;
   cancelled.store(false);
   if(start<0||start>720||(duration!=0&&duration!=10&&duration!=60))
     throw std::runtime_error("Unsupported preview duration/position");
+  if(threads<1||threads>8)throw std::runtime_error("Unsupported thread count");
   Audio info=loadWav(wav,0,0);
   const size_t rate=info.rate,total=info.totalFrames;
   const size_t preview=size_t(duration)*rate;
@@ -367,60 +391,100 @@ std::array<std::string,5> extract(JNIEnv*env,
   if(outFrames==0)throw std::runtime_error("No audio to separate");
   struct statvfs fs{};
   if(statvfs(folder.c_str(),&fs)!=0)throw std::runtime_error("Cannot check free space");
-  const uint64_t needed=uint64_t(outFrames)*56+150'000'000;
+  // Final stems, their scratch copies, and four model-rate tracks with their context.
+  const uint64_t needed=uint64_t(outFrames)*92+150'000'000;
   if(uint64_t(fs.f_bavail)*fs.f_frsize<needed)
     throw std::runtime_error("Storage low: need "+std::to_string((needed+999999)/1000000)+
                              " MB free for temporary and 24-bit stems");
   const size_t core=CHUNK_SECONDS*rate;
   const int count=int((selected+core-1)/core);
   Scratch writer(folder,prefix);
+  struct Section{size_t from,to,padFrom,padTo;};
+  std::vector<Section> sections;
+  for(int idx=0;idx<count;idx++){
+    const size_t from=size_t(idx)*core,to=std::min(selected,from+core);
+    sections.push_back({from,to,from>PAD_SECONDS*rate?from-PAD_SECONDS*rate:0,
+                        std::min(selected,to+PAD_SECONDS*rate)});
+  }
+  Track vocals(writer.base+".vocals.pass"),instrumental(writer.base+".instrumental.pass"),
+        drumTrack(writer.base+".drums.pass"),bassTrack(writer.base+".bass.pass");
+  int modelRate=0;
+  double vocalSeconds=0,drumSeconds=0,bassSeconds=0;
+  std::vector<float> a,b,c,d;
+
+  // Pass 1: vocals and instrumental, from the song.
+  auto clock=std::chrono::steady_clock::now();
+  {
+    Engine engine(vocalModel,threads);
+    for(int idx=0;idx<count;idx++){
+      checkCancel();
+      progress(env,callback,0,idx,count);
+      const Section&s=sections[idx];
+      Audio input=loadWav(wav,offset+s.padFrom,s.padTo-s.padFrom);
+      OutputPtr out=engine.run(int(input.rate),int(input.frames),input.planes[0].data(),input.planes[1].data());
+      if(idx==0)modelRate=out->sample_rate;
+      else if(out->sample_rate!=modelRate)throw std::runtime_error("Vocal model changed sample rate");
+      vocals.put(out->stems[0]);
+      instrumental.put(out->stems[1]);
+    }
+  }
+  vocalSeconds=secondsSince(clock);
+
+  // Pass 2: drums, from the instrumental.
+  clock=std::chrono::steady_clock::now();
+  {
+    Engine engine(drumModel,threads);
+    for(int idx=0;idx<count;idx++){
+      checkCancel();
+      progress(env,callback,1,idx,count);
+      instrumental.get(idx,a,b);
+      OutputPtr out=engine.run(modelRate,int(a.size()),a.data(),b.data());
+      if(out->sample_rate!=modelRate||size_t(out->stems[0].n)!=a.size())
+        throw std::runtime_error("Second-pass drum sample alignment mismatch");
+      drumTrack.put(out->stems[0]);
+    }
+  }
+  drumSeconds=secondsSince(clock);
+
+  // Pass 3: bass, from what is left after the drums.
+  clock=std::chrono::steady_clock::now();
+  {
+    Engine engine(bassModel,threads);
+    for(int idx=0;idx<count;idx++){
+      checkCancel();
+      progress(env,callback,2,idx,count);
+      instrumental.get(idx,a,b);
+      drumTrack.get(idx,c,d);
+      for(size_t n=0;n<a.size();n++){a[n]-=c[n];b[n]-=d[n];}
+      OutputPtr out=engine.run(modelRate,int(a.size()),a.data(),b.data());
+      if(out->sample_rate!=modelRate||size_t(out->stems[0].n)!=a.size())
+        throw std::runtime_error("Bass output not aligned");
+      bassTrack.put(out->stems[0]);
+    }
+  }
+  bassSeconds=secondsSince(clock);
+
+  // Join the sections, exactly as before, once all three passes are done.
+  std::vector<float> vl,vr,il,ir,dl,dr,bl,br;
   for(int idx=0;idx<count;idx++){
     checkCancel();
-    const size_t from=size_t(idx)*core,to=std::min(selected,from+core);
-    const size_t padFrom=from>PAD_SECONDS*rate?from-PAD_SECONDS*rate:0;
-    const size_t padTo=std::min(selected,to+PAD_SECONDS*rate);
-    progress(env,callback,0,idx,count);
-    Audio input=loadWav(wav,offset+padFrom,padTo-padFrom);
-    OutputPtr vox=runModel(vocalModel,int(input.rate),int(input.frames),
-                           input.planes[0].data(),input.planes[1].data());
-    input.planes.clear();
-    progress(env,callback,1,idx,count);
-    const auto&instrumental=vox->stems[1];
-    OutputPtr drums=runModel(drumModel,vox->sample_rate,instrumental.n,
-                           instrumental.samples[0],instrumental.samples[1]);
-    validateOutput(vox.get(),"Vocal inference");
-    validateOutput(drums.get(),"Drum inference");
-    if(vox->sample_rate!=drums->sample_rate||vox->stems[0].n!=drums->stems[0].n)
-      throw std::runtime_error("Second-pass drum sample alignment mismatch");
-    progress(env,callback,2,idx,count);
-    // Separate bass from the post-drum residual, not the original mix.
-    std::vector<float> bassLeft(instrumental.n),bassRight(instrumental.n);
-    for(int n=0;n<instrumental.n;n++){
-      bassLeft[n]=instrumental.samples[0][n]-drums->stems[0].samples[0][n];
-      bassRight[n]=instrumental.samples[1][n]-drums->stems[0].samples[1][n];
-    }
-    OutputPtr bass=runModel(bassModel,vox->sample_rate,instrumental.n,
-                          bassLeft.data(),bassRight.data());
-    std::vector<float>().swap(bassLeft);
-    std::vector<float>().swap(bassRight);
-    validateOutput(bass.get(),"Bass inference");
-    if(bass->sample_rate!=vox->sample_rate||
-       bass->stems[0].n!=vox->stems[0].n)
-      throw std::runtime_error("Bass output not aligned");
     progress(env,callback,3,idx,count);
-    const size_t from48=(uint64_t(from)*48000+rate/2)/rate;
-    const size_t to48=(uint64_t(to)*48000+rate/2)/rate;
-    const size_t padded48=(uint64_t(padFrom)*48000+rate/2)/rate;
+    const Section&s=sections[idx];
+    vocals.get(idx,vl,vr);instrumental.get(idx,il,ir);drumTrack.get(idx,dl,dr);bassTrack.get(idx,bl,br);
+    const View vv=view(vl,vr),iv=view(il,ir),dv=view(dl,dr),bv=view(bl,br);
+    const size_t from48=(uint64_t(s.from)*48000+rate/2)/rate;
+    const size_t to48=(uint64_t(s.to)*48000+rate/2)/rate;
+    const size_t padded48=(uint64_t(s.padFrom)*48000+rate/2)/rate;
     const size_t coreLocal=from48-padded48;
     if(writer.pending){
       if(coreLocal<writer.pending)
         throw std::runtime_error("Insufficient left-context samples");
-      auto left=render(vox.get(),drums.get(),bass.get(),coreLocal-writer.pending,writer.pending);
+      auto left=render(vv,iv,dv,bv,modelRate,coreLocal-writer.pending,writer.pending);
       writer.join(left);
     }
     const size_t frames=to48-from48;
     const size_t hold=idx+1<count?std::min(BLEND48,frames):0;
-    auto current=render(vox.get(),drums.get(),bass.get(),coreLocal,frames);
+    auto current=render(vv,iv,dv,bv,modelRate,coreLocal,frames);
     writer.append(current,0,frames-hold);
     if(hold)writer.saveTail(current,hold);
   }
@@ -461,7 +525,9 @@ std::array<std::string,5> extract(JNIEnv*env,
   std::array<std::string,5> result{};
   for(int st=0;st<4;st++)result[st]=writer.finals[st];
   result[4]=std::string(duration==0?"Full song":duration==60?"60s test":"10s test")+
-     " · "+std::to_string(count)+" sections · shared gain "+
+     " · "+std::to_string(count)+" sections · "+std::to_string(threads)+" threads · vocals "+
+     std::to_string(int(vocalSeconds+.5))+"s, drums "+std::to_string(int(drumSeconds+.5))+
+     "s, bass "+std::to_string(int(bassSeconds+.5))+"s · shared gain "+
      std::to_string(20*std::log10(gain))+" dB";
   return result;
 }
@@ -483,10 +549,10 @@ void javaError(JNIEnv *env, const std::string& msg) {
 extern "C" JNIEXPORT jobjectArray JNICALL
 Java_com_dennis_stemstudio_FourStemNative_separate(JNIEnv*env,jclass,
   jstring vocalModel,jstring drumModel,jstring bassModel,jstring wav,jstring folder,
-  jstring prefix,jint startSeconds,jint durationSeconds,jobject listener){
+  jstring prefix,jint startSeconds,jint durationSeconds,jint threads,jobject listener){
   try{
     const auto results=extract(env,jstr(env,vocalModel),jstr(env,drumModel),
-       jstr(env,wav),jstr(env,folder),jstr(env,prefix),jstr(env,bassModel),int(startSeconds),int(durationSeconds),listener);
+       jstr(env,wav),jstr(env,folder),jstr(env,prefix),jstr(env,bassModel),int(startSeconds),int(durationSeconds),int(threads),listener);
     jclass cls=env->FindClass("java/lang/String");
     if(!cls)return nullptr;
     jobjectArray values=env->NewObjectArray(5,cls,nullptr);

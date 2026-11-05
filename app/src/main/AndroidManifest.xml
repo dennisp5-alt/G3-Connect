@@ -2,7 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application
         android:allowBackup="false"
-        android:label="Dennis Stem Studio 4-Stem Experimental"
+        android:label="Stem Studio 4-Stem Fast"
         android:theme="@style/StemTheme"
         android:usesCleartextTraffic="false">
         <activity android:name=".FourStemActivity" android:exported="false" />

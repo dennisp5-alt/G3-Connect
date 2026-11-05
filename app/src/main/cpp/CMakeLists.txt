@@ -19,3 +19,5 @@ target_link_libraries(dennisthree sherpa-c-api log)
 add_library(dennisfour SHARED four_stem_sequential_native.cpp)
 target_include_directories(dennisfour PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(dennisfour sherpa-c-api log)
+# Debug APKs would otherwise leave the join and export code unoptimised.
+target_compile_options(dennisfour PRIVATE -O3)
