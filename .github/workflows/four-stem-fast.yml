@@ -25,13 +25,13 @@ jobs:
         run: |
           python -m pip install --disable-pip-version-check onnx numpy 'sherpa-onnx==1.13.8'
           mkdir -p /tmp/raw models
-          curl -fLsS --retry 3 "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/kuielab_b_bass.onnx?download=true" -o /tmp/raw/bass.onnx
-          curl -fLsS --retry 3 "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/kuielab_b_drums.onnx?download=true" -o /tmp/raw/drums.onnx
+          curl -fLsS --retry 3 "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/kuielab_b_bass.onnx?download=true" -o /tmp/raw/kuielab_b_bass.onnx
+          curl -fLsS --retry 3 "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/kuielab_b_drums.onnx?download=true" -o /tmp/raw/kuielab_b_drums.onnx
           curl -fLsS --retry 3 "https://github.com/k2-fsa/sherpa-onnx/releases/download/source-separation-models/UVR_MDXNET_9482.onnx" -o models/UVR_MDXNET_9482.onnx
-          echo "b4b7080fe501d0bece62076c5d4eda4d6590c5207ed78ec84a57bac0740a061d  /tmp/raw/bass.onnx" | sha256sum --check
-          echo "a6fecee758059b33ed99f6dabba297439b3e7cacfac4b1097bd324aff8052208  /tmp/raw/drums.onnx" | sha256sum --check
-          python experiments/four-stem/prepare_bass_uvr.py --input /tmp/raw/bass.onnx --output models/kuielab_b_bass_sherpa.onnx
-          python experiments/three-stem/prepare_drum_uvr.py --input /tmp/raw/drums.onnx --output models/kuielab_b_drums_sherpa.onnx
+          echo "b4b7080fe501d0bece62076c5d4eda4d6590c5207ed78ec84a57bac0740a061d  /tmp/raw/kuielab_b_bass.onnx" | sha256sum --check
+          echo "a6fecee758059b33ed99f6dabba297439b3e7cacfac4b1097bd324aff8052208  /tmp/raw/kuielab_b_drums.onnx" | sha256sum --check
+          python experiments/four-stem/prepare_bass_uvr.py --input /tmp/raw/kuielab_b_bass.onnx --output models/kuielab_b_bass_sherpa.onnx
+          python experiments/three-stem/prepare_drum_uvr.py --input /tmp/raw/kuielab_b_drums.onnx --output models/kuielab_b_drums_sherpa.onnx
           sha256sum models/*
       - name: Build the old and new engines for this computer
         run: |
