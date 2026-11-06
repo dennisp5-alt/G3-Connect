@@ -92,6 +92,10 @@ public class MainActivity extends Activity {
         Button four=button("4 STEMS · Vocals / Drums / Bass / Other");extra.addView(four);
         four.setOnClickListener(v->startActivity(new Intent(this,FourStemActivity.class)));
         extra.addView(text("Sequential AI processing · start with a 10-second preview.",12,MUTE,false));
+        gap(extra,8);
+        Button six=button("6 STEMS · adds Guitar and Piano");extra.addView(six);
+        six.setOnClickListener(v->startActivity(new Intent(this,SixStemActivity.class)));
+        extra.addView(text("One large AI model · start with a 10-second preview.",12,MUTE,false));
         gap(body,16);
         body.addView(text("OR USE THE ORIGINAL TWO-STEM MODE",12,AQUA,true));gap(body,12);
 

@@ -6,6 +6,7 @@
         android:theme="@style/StemTheme"
         android:usesCleartextTraffic="false">
         <activity android:name=".FourStemActivity" android:exported="false" />
+        <activity android:name=".SixStemActivity" android:exported="false" />
         <activity android:name=".ThreeStemActivity" android:exported="false" />
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>

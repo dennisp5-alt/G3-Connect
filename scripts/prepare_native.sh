@@ -19,4 +19,11 @@ cp "$LIBS"/*.so app/src/main/jniLibs/arm64-v8a/
 mkdir -p app/src/main/cpp/sherpa-onnx/c-api
 curl -fL --retry 3 "https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/v${VERSION}/sherpa-onnx/c-api/c-api.h" \
   -o app/src/main/cpp/sherpa-onnx/c-api/c-api.h
+# Six stems calls ONNX Runtime directly, so it needs the C API header of the bundled version.
+ORT_VERSION='1.28.2'
+mkdir -p app/src/main/cpp/onnxruntime
+for HEADER in onnxruntime_c_api.h onnxruntime_error_code.h onnxruntime_ep_c_api.h; do
+  curl -fL --retry 3 "https://raw.githubusercontent.com/microsoft/onnxruntime/v${ORT_VERSION}/include/onnxruntime/core/session/${HEADER}" \
+    -o "app/src/main/cpp/onnxruntime/${HEADER}"
+done
 printf 'Native libraries and header ready for v%s\n' "$VERSION"

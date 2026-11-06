@@ -4,6 +4,7 @@ local.properties
 **/build/
 app/src/main/jniLibs/*/*.so
 app/src/main/cpp/sherpa-onnx/
+app/src/main/cpp/onnxruntime/
 *.onnx
 *.wav
 *.apk
