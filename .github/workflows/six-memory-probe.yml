@@ -1,0 +1,32 @@
+name: Six-stem memory probe
+on:
+  push:
+    branches:
+      - experiment/six-stem-memory-probe
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe
+        run: |
+          set -o pipefail
+          free -g | sed -n 2p; nproc
+          mkdir -p models /tmp/h/onnxruntime
+          curl -fLsS --retry 3 "https://huggingface.co/StemSplitio/htdemucs-6s-onnx/resolve/main/htdemucs_6s_fp16weights.onnx" -o models/fp16.onnx
+          curl -fLsS --retry 3 "https://huggingface.co/StemSplitio/htdemucs-6s-onnx/resolve/main/htdemucs_6s.onnx" -o models/fp32.onnx
+          for H in onnxruntime_c_api.h onnxruntime_error_code.h onnxruntime_ep_c_api.h; do
+            curl -fLsS "https://raw.githubusercontent.com/microsoft/onnxruntime/v1.28.2/include/onnxruntime/core/session/$H" -o /tmp/h/onnxruntime/$H
+          done
+          V=1.13.8
+          curl -fLsS --retry 3 "https://github.com/k2-fsa/sherpa-onnx/releases/download/v$V/sherpa-onnx-v$V-linux-x64-shared.tar.bz2" -o /tmp/sherpa.tar.bz2
+          mkdir -p /tmp/sherpa && tar -xjf /tmp/sherpa.tar.bz2 -C /tmp/sherpa --strip-components=1
+          F=$(find /tmp/sherpa -name 'libonnxruntime*.so*' | head -1); L=$(dirname "$F")
+          g++ -std=c++17 -O2 -I/tmp/h experiments/six-stem/probe.cpp -o /tmp/probe -L"$L" -l:$(basename "$F") -Wl,-rpath,"$L"
+          for c in "fp16 4 99 0 0 1" "fp32 4 99 0 0 1" "fp16 4 99 1 1 1" "fp16 4 1 0 0 1" "fp16 4 0 0 0 1" "fp16 4 99 0 0 0" "fp16 2 99 0 0 1" "fp16 1 99 0 0 1" "fp16 4 2 1 1 0"; do
+            set -- $c; m=$1; shift
+            echo "== $m $*"; timeout 300 /tmp/probe models/$m.onnx "$@" || echo failed $?
+          done
