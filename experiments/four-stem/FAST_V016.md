@@ -37,6 +37,11 @@ config file. The peak falls to about 1.7 GB, and memory drops back to about 0.3 
 runs, with no speed cost. The result line now reports the peak memory for the run.
 The app id is `.fast017`, so it installs beside v0.1.6.
 
+Measured on a computer at 2 threads, with Catch Me Before I Fall2:
+- 60 seconds, v0.1.6: peak 3,889 MB, 78.7 seconds
+- 60 seconds, v0.1.7: peak 1,729 MB, 81.2 seconds, and all four stems are bit-identical
+- Whole song, 3:42, v0.1.7: peak 1,735 MB, 305 seconds, 13 sections
+
 ## Phone test, in order
 1. Use the same song and the 60-second section in v0.1.4 and in this build at 2 threads.
 2. Repeat at 4, then 5 threads. More threads can be slower if the phone's small cores join in.
