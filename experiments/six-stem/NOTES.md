@@ -8,6 +8,9 @@ ONNX by StemSplit. The fp16-weights file is 136 MB. sherpa-onnx has no Demucs su
   triangular weights. Finished audio leaves memory after each section.
 - Other is the song minus the five named stems, so all six add back up to the song.
 - The memory arena and pattern stay off, as v0.1.7 proved they must.
+- Graph optimization is off too. Every level above none peaked at 6.1 GB while loading, whatever the
+  threads, weights or arena. With it off, loading peaks at 0.25 GB and running at about 1.4 GB, and
+  each section takes 11 s instead of 8 s on the 4-thread test machine.
 - Stems are 48 kHz, 24-bit, named like the four-stem ones, and Master Room accepts them from 0.8.1.
 - Installs as `.six018`, beside the other builds. Nothing on `main` or in the two, three and
   four-stem screens changed.

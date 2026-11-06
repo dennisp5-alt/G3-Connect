@@ -193,7 +193,9 @@ public:
     check(api->SetSessionExecutionMode(options,ORT_SEQUENTIAL));
     check(api->DisableCpuMemArena(options));
     check(api->DisableMemPattern(options));
-    check(api->SetSessionGraphOptimizationLevel(options,ORT_ENABLE_ALL));
+    // Any graph optimization makes loading this model peak at 6.1 GB, which no phone can give.
+    // Without it, loading peaks at 0.25 GB and running at 1.4 GB, for about 30% longer per section.
+    check(api->SetSessionGraphOptimizationLevel(options,ORT_DISABLE_ALL));
     check(api->CreateSession(env,path.c_str(),options,&session));
     check(api->CreateCpuMemoryInfo(OrtDeviceAllocator,OrtMemTypeDefault,&memory));
     OrtAllocator*allocator=nullptr;

@@ -22,7 +22,10 @@ for name in ('Vocals', 'Drums', 'Bass', 'Other', 'Guitar', 'Piano'):
     parts[name], _ = read(f'{sys.argv[2]}/{sys.argv[3]}_{name}_24bit.wav')
 total = sum(parts.values())
 n = min(len(total), len(song))
-song = song[:n]
+# The model works at 44.1 kHz, so nothing above its top end comes back.
+top = signal.butter(8, 20000, fs=48000, output='sos')
+song = signal.sosfiltfilt(top, song[:n], axis=0)
+total = signal.sosfiltfilt(top, total[:n], axis=0)
 def db(x):
     return 10 * np.log10(np.mean(x ** 2) + 1e-20)
 for name, p in parts.items():

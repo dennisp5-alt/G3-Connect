@@ -51,6 +51,7 @@ jobs:
           if-no-files-found: error
       - name: Run the engine on 60 seconds for time, memory and the sum
         run: |
+          set -o pipefail
           V=1.13.8
           curl -fLsS --retry 3 "https://github.com/k2-fsa/sherpa-onnx/releases/download/v$V/sherpa-onnx-v$V-linux-x64-shared.tar.bz2" -o /tmp/sherpa.tar.bz2
           mkdir -p /tmp/sherpa && tar -xjf /tmp/sherpa.tar.bz2 -C /tmp/sherpa --strip-components=1
