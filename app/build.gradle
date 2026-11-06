@@ -8,15 +8,15 @@ android {
         applicationId 'com.dennis.stemstudio'
         minSdk 29
         targetSdk 34
-        versionCode 6
-        versionName '0.1.6-four-stem-fast'
+        versionCode 7
+        versionName '0.1.7-four-stem-low-memory'
         ndk { abiFilters 'arm64-v8a' }
         externalNativeBuild {
             cmake { cppFlags '-std=c++17 -Wall -Wextra' }
         }
     }
     buildTypes {
-        debug { debuggable true; applicationIdSuffix '.fast016' }
+        debug { debuggable true; applicationIdSuffix '.fast017' }
         release {
             minifyEnabled false
         }

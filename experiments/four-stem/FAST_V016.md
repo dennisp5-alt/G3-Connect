@@ -25,6 +25,18 @@ and it can only be measured on the phone. The corrected bass stem had 97.7% of i
 below 150 Hz, against 0.1% in the v0.1.4 report. Stems are not identical to v0.1.4 because
 the sections fall differently, so compare them by ear.
 
+## v0.1.7: the crash on full songs
+Phones climbed past 3,000 MB and then crashed. Measured on a computer with the real models:
+the AI runtime keeps its working memory, then builds a second block when the section size
+changes, so a 20-second section took 1.9 GB on the first run and 3.8 GB on the next.
+Each model does this. Sections cannot be made safe by shortening them, as the bass model
+still peaked at 1.7 GB at 11.5 seconds.
+
+v0.1.7 turns off the runtime's memory arena and memory pattern through sherpa-onnx's provider
+config file. The peak falls to about 1.7 GB, and memory drops back to about 0.3 GB between
+runs, with no speed cost. The result line now reports the peak memory for the run.
+The app id is `.fast017`, so it installs beside v0.1.6.
+
 ## Phone test, in order
 1. Use the same song and the 60-second section in v0.1.4 and in this build at 2 threads.
 2. Repeat at 4, then 5 threads. More threads can be slower if the phone's small cores join in.
