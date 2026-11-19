@@ -12,6 +12,7 @@ final class Demo {
     static void fill(Session s, String state) {
         s.device = "NVIDIA GeForce RTX 3050 Laptop GPU";
         s.onGpu = true;
+        s.cores = 12;
         if (state.equals("empty")) return;
         s.setSong(new File("C:\\Users\\denni\\Music\\Suno\\Dusty Road (final mix).wav"));
         s.outDir = new File("C:\\Users\\denni\\Documents\\Stem Studio\\Dusty Road");
@@ -27,6 +28,7 @@ final class Demo {
             s.mixPeaks[i] = (float) Math.min(1, Math.sqrt(sum) * 0.82);
         }
         s.stage = Session.Stage.READY;
+        s.estimate = "About 1 minute for this song";
         if (state.equals("ready")) return;
         for (int i = 0; i < 6; i++) s.stemPeaks[i] = stems[i];
         if (state.equals("separating")) {

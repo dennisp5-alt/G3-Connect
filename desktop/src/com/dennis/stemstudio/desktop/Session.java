@@ -22,9 +22,16 @@ final class Session {
     int section, sections;       // AI sections done / total
     String stageText = "";       // what is happening now, in words
     double secondsLeft = Double.NaN;
-    String device = "";          // where it runs: "NVIDIA GeForce RTX 3050 Laptop GPU" or "Processor, 12 threads"
-    boolean onGpu;
+    String device = "";          // the graphics card's name, or "" when there is none
+    boolean onGpu;               // there is a graphics card to use
+    boolean engineReady = true;
+    int cores = Runtime.getRuntime().availableProcessors();
+    String estimate = "";        // how long separating this song should take, in words
     String result = "";          // how the last run went, in words
+    boolean resultBad;
+    String notice = "";          // after saving or sending the stems
+    boolean noticeBad;
+    String format = "";          // "MP3", "FLAC" when the song is not a WAV
 
     // The six stems, in Theme.STEMS order.
     final float[][] stemPeaks = new float[6][];
@@ -51,6 +58,13 @@ final class Session {
         int cut = Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/'));
         fileName = cut < 0 ? p : p.substring(cut + 1);
         folder = cut < 0 ? "" : p.substring(0, cut);
+    }
+
+    /** "45 seconds", "about 2 minutes" style lengths of time. */
+    static String duration(double sec) {
+        if (sec < 55) return Math.max(5, Math.round(sec / 5) * 5) + " seconds";
+        if (sec < 90) return "1 minute";
+        return Math.round(sec / 60) + " minutes";
     }
 
     static String clock(double seconds) {

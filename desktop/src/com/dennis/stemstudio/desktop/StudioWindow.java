@@ -116,32 +116,36 @@ class StudioWindow {
             songName.set(s.fileName, null);
             songWhere.set(s.folder, null);
         }
-        if (s.outDir != null) savedWhere.set("Saved in " + shortPath(s.outDir.getPath()), null);
+        if (s.outDir != null && s.notice.isEmpty()) savedWhere.set("Saved in " + shortPath(s.outDir.getPath()), Theme.DIM);
+        else if (!s.notice.isEmpty()) savedWhere.set(s.notice, s.noticeBad ? Theme.WARN : Theme.MID);
         device.setEnabled(!busy && !empty);
-        device.setVisible(s.onGpu || !s.device.isEmpty());
-        deviceNote.set(s.device.isEmpty() ? "" : (device.selected == 0 ? "Uses " + s.device + "." : "Uses the processor. Slower, but always works."), null);
+        device.setVisible(s.onGpu);
+        deviceNote.set(!s.engineReady ? "The separation engine is missing from the app folder. Reinstall Stem Studio."
+            : s.onGpu ? (device.selected == 0 ? "Uses " + s.device + ". If it cannot, the processor takes over." : "Uses the processor (" + s.cores + " threads). Slower, but always works.")
+            : "Uses the processor (" + s.cores + " threads). No graphics card was found.", s.engineReady ? Theme.DIM : Theme.WARN);
         bar.setVisible(busy || done);
-        progressText.setVisible(busy || done);
+        progressText.setVisible(busy || done || !s.result.isEmpty());
+        if (!busy && !done) progressText.set(s.result, s.resultBad ? Theme.WARN : Theme.MID);
         if (busy) {
             separate.set("Stop", Ui.Kind.DANGER);
             separate.note = null;
             separate.setPreferredSize(new Dimension(160, 44));
             separate.setMaximumSize(new Dimension(Integer.MAX_VALUE, 44));
-            String left = Double.isFinite(s.secondsLeft) ? (s.secondsLeft >= 90 ? "About " + Math.round(s.secondsLeft / 60) + " minutes left" : "About " + Math.max(5, Math.round(s.secondsLeft / 5) * 5) + " seconds left") : "Working out how long";
+            String left = Double.isFinite(s.secondsLeft) ? "About " + Session.duration(s.secondsLeft) + " left" : "Working out how long";
             progressText.set(s.stageText + "\n" + left, Theme.MID);
         } else if (done) {
             separate.set("Separate again", Ui.Kind.SECONDARY);
             separate.note = null;
             separate.setPreferredSize(new Dimension(160, 40));
             separate.setMaximumSize(new Dimension(Integer.MAX_VALUE, 40));
-            progressText.set(s.result, Theme.MID);
+            progressText.set(s.result, s.resultBad ? Theme.WARN : Theme.MID);
         } else {
             separate.set("Separate into six stems", Ui.Kind.PRIMARY);
-            separate.note = empty ? "Choose a song first" : s.seconds > 0 ? estimate() : null;
+            separate.note = empty ? "Choose a song first" : s.estimate.isEmpty() ? null : s.estimate;
             separate.setPreferredSize(new Dimension(160, 60));
             separate.setMaximumSize(new Dimension(Integer.MAX_VALUE, 60));
         }
-        separate.setEnabled(!empty);
+        separate.setEnabled(!empty && s.engineReady);
         toMasterRoom.set("Send to Master Room", done ? Ui.Kind.PRIMARY : Ui.Kind.SECONDARY);
         toMasterRoom.note = done ? "As a ZIP that Master Room opens as stems" : null;
         toMasterRoom.setEnabled(done);
@@ -159,11 +163,6 @@ class StudioWindow {
         return at >= 0 ? p.substring(at) : p;
     }
 
-    private String estimate() {
-        // Measured: about 0.9 s per second of song on a 4-core processor; a graphics card is several times faster.
-        double sec = s.seconds * (device.selected == 0 && s.onGpu ? 0.15 : 0.6);
-        return sec < 90 ? "About " + Math.max(10, Math.round(sec / 10) * 10) + " seconds for this song" : "About " + Math.round(sec / 60) + " minutes for this song";
-    }
 
     // ---------- Pieces ----------
 
@@ -177,7 +176,7 @@ class StudioWindow {
             g.setFont(Theme.display(20f));
             g.setColor(Theme.TEXT);
             g.drawString("Stem Studio", 66, 41);
-            if (!s.device.isEmpty()) {
+            if (s.engineReady) {
                 String t = s.onGpu ? "Graphics card ready" : "Processor only";
                 g.setFont(Theme.medium(12.5f));
                 int tw = g.getFontMetrics().stringWidth(t) + 40, x = getWidth() - 20 - tw;

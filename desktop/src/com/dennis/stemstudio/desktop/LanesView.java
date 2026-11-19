@@ -130,7 +130,7 @@ final class LanesView extends JComponent {
         Ui.text(g, s.title, PAD, 40, maxTitle);
         int x = PAD + Math.min(maxTitle, g.getFontMetrics().stringWidth(s.title)) + 18;
         g.setFont(Theme.body(13f));
-        for (String fact : new String[]{Session.clock(s.seconds), s.rate / 1000.0 + " kHz", s.bits > 0 ? s.bits + "-bit" : null}) {
+        for (String fact : new String[]{Session.clock(s.seconds), s.rate / 1000.0 + " kHz", s.bits > 0 ? s.bits + "-bit" : s.format.isEmpty() ? null : s.format}) {
             if (fact == null) continue;
             String f = fact.replace(".0 kHz", " kHz");
             int fw = g.getFontMetrics().stringWidth(f) + 18;
@@ -198,7 +198,7 @@ final class LanesView extends JComponent {
         g.setColor(Theme.DIM);
         g.drawString(s.separated() ? "All six stems together" : "The song as it came in", PAD + GUTTER + 14, y + 50);
         Color c = new Color(0xC9D3DD);
-        bars(g, s.mixPeaks, waveX(), y, waveW(), MIX, c, s.stage == Session.Stage.SEPARATING ? -1 : 1, s.separated() ? 0.55f : 0.85f);
+        bars(g, s.mixPeaks, waveX(), y, waveW(), MIX, c, s.stage == Session.Stage.SEPARATING ? -1 : 1, s.separated() ? 0.55f : 0.85f, scale(new float[][]{s.mixPeaks}));
     }
 
     private void paintLane(Graphics2D g, int i) {
@@ -232,7 +232,7 @@ final class LanesView extends JComponent {
         if (s.stemPeaks[i] != null && s.stage != Session.Stage.READY) {
             double upTo = s.stage == Session.Stage.SEPARATING ? s.progress : 1;
             Color draw = heard ? c : new Color(0x47505B);
-            bars(g, s.stemPeaks[i], waveX(), y, waveW(), lh, draw, upTo, 1f);
+            bars(g, s.stemPeaks[i], waveX(), y, waveW(), lh, draw, upTo, 1f, scale(new float[][]{s.mixPeaks}));
         } else {
             g.setColor(Theme.HAIR);
             g.setStroke(new BasicStroke(1f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 1, new float[]{3, 5}, 0));
@@ -279,7 +279,17 @@ final class LanesView extends JComponent {
      * A waveform as rounded bars mirrored about the middle. Left of the playhead is full colour, the rest a
      * little quieter. upTo &lt; 1 draws only that much (the separation so far); -1 draws all, unplayed.
      */
-    private void bars(Graphics2D g, float[] peaks, int x0, int y0, int w, int h, Color c, double upTo, float strength) {
+    /**
+     * The mix fills its lane, and every stem is drawn on the same scale, so a stem's size shows its share of
+     * the song (a quiet piano looks quiet) and nothing jumps as the separation fills in. At most 4 times up.
+     */
+    private static float scale(float[][] sets) {
+        float max = 0;
+        for (float[] p : sets) if (p != null) for (float v : p) max = Math.max(max, v);
+        return max <= 0 ? 1 : Math.min(4f, 0.95f / max);
+    }
+
+    private void bars(Graphics2D g, float[] peaks, int x0, int y0, int w, int h, Color c, double upTo, float strength, float scale) {
         if (peaks == null || peaks.length == 0) return;
         float mid = y0 + h / 2f, room = h / 2f - 7;
         float play = (float) (x0 + w * s.at);
@@ -291,7 +301,7 @@ final class LanesView extends JComponent {
             int a = (int) ((long) (x - x0) * peaks.length / w), b = (int) Math.max(a + 1, (long) (x - x0 + step) * peaks.length / w);
             float p = 0;
             for (int k = a; k < Math.min(b, peaks.length); k++) p = Math.max(p, peaks[k]);
-            float bh = Math.max(1.2f, (float) Math.pow(p, 0.8) * room);
+            float bh = Math.max(1.2f, (float) Math.pow(Math.min(1, p * scale), 0.8) * room);
             boolean played = upTo >= 0 && s.at > 0 && x <= play;
             Color col = Theme.alpha(c, (int) (255 * strength * (played ? 1 : upTo < 0 ? 0.55 : 0.72)));
             g.setColor(col);

@@ -24,6 +24,7 @@ public final class Main {
         System.setProperty("awt.useSystemAAFontSettings", "on");
         SwingUtilities.invokeLater(() -> {
             Theme.load();
+            try { UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName()); } catch (Exception ignored) { }
             StudioWindow w = new StudioWindow();
             JFrame f = new JFrame("Stem Studio");
             f.setIconImages(AppIcon.images());
@@ -32,7 +33,9 @@ public final class Main {
             f.setMinimumSize(new java.awt.Dimension(1200, 760));
             f.setSize(1440, 880);
             f.setLocationRelativeTo(null);
+            Studio studio = new Studio(w, f);
             f.setVisible(true);
+            if (args.length > 0 && new File(args[0]).isFile()) studio.open(new File(args[0]));
         });
     }
 }

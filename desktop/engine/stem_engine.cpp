@@ -24,6 +24,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -34,6 +35,7 @@
 #include "onnxruntime_c_api.h"
 #ifdef STEM_DIRECTML
 #include "dml_provider_factory.h"
+#include <dxgi1_6.h>
 #endif
 
 namespace {
@@ -169,6 +171,7 @@ const char*const NAMES[STEMS]{"Vocals","Drums","Bass","Other","Guitar","Piano"};
 constexpr int FROM_MODEL[STEMS]{3,0,1,-1,4,5};
 
 std::atomic<bool> busy{false};
+int peakColumns=0;  // --peaks N: after each section, the stems' overview so far (the app fills its lanes live)
 std::atomic<bool> cancelled{false};
 std::atomic<bool> stopAsked{false};  // set only by the app; survives the run's own reset
 void checkCancel(){if(cancelled.load())throw std::runtime_error("Processing cancelled between sections");}
@@ -244,7 +247,15 @@ public:
     // basic level (about 30% faster per section on the processor); the full level is no faster here.
     check(api->SetSessionGraphOptimizationLevel(options,useGpu?ORT_ENABLE_ALL:ORT_ENABLE_BASIC));
 #ifdef STEM_DIRECTML
-    if(useGpu)check(OrtSessionOptionsAppendExecutionProvider_DML(options,0));
+    if(useGpu){
+      // The fastest card (on a laptop, the separate graphics card rather than the one in the processor).
+      const OrtDmlApi*dml=nullptr;
+      check(api->GetExecutionProviderApi("DML",ORT_API_VERSION,reinterpret_cast<const void**>(&dml)));
+      OrtDmlDeviceOptions choice{};
+      choice.Preference=OrtDmlPerformancePreference::HighPerformance;
+      choice.Filter=OrtDmlDeviceFilter::Gpu;
+      check(dml->SessionOptionsAppendExecutionProvider_DML2(options,&choice));
+    }
 #else
     if(useGpu)throw std::runtime_error("This engine was built without graphics card support");
 #endif
@@ -428,6 +439,9 @@ std::array<std::string,STEMS+1> extract(const std::string&modelPath,const std::s
     std::array<std::vector<float>,STEMS*2> held;
     for(int s=0;s<STEMS;s++)if(FROM_MODEL[s]>=0)held[2*s].assign(SEGMENT,0.f),held[2*s+1].assign(SEGMENT,0.f);
     std::vector<float> line(STRIDE);
+    std::vector<float> rest(STRIDE*2);
+    std::array<std::vector<float>,STEMS> columns;
+    if(peakColumns>0)for(auto&c:columns)c.assign(size_t(peakColumns),0.f);
     size_t written=0;
     for(int idx=0;idx<count;idx++){
       checkCancel();
@@ -450,6 +464,7 @@ std::array<std::string,STEMS+1> extract(const std::string&modelPath,const std::s
       for(size_t i=0;i<SEGMENT;i++)sum[i]+=weight[i];
       // Everything before the next section's start is final, so it can leave memory now.
       const size_t ready=std::min(STRIDE,frames-written);
+      if(peakColumns>0)for(size_t i=0;i<ready;i++){rest[i]=mixL[written+i];rest[STRIDE+i]=mixR[written+i];}
       for(int s=0;s<STEMS;s++){
         if(FROM_MODEL[s]<0)continue;
         for(int c=0;c<2;c++){
@@ -457,6 +472,11 @@ std::array<std::string,STEMS+1> extract(const std::string&modelPath,const std::s
             const float x=float(double(held[2*s+c][i])/sum[i]*deviation+mean);
             if(!std::isfinite(x))throw std::runtime_error("Invalid stem sample");
             line[i]=x;
+          }
+          if(peakColumns>0)for(size_t i=0;i<ready;i++){
+            rest[size_t(c)*STRIDE+i]-=line[i];
+            float&col=columns[s][std::min(size_t(peakColumns-1),(written+i)*size_t(peakColumns)/frames)];
+            col=std::max(col,std::abs(line[i]));
           }
           // Left then right would need the file rewound, so each stem keeps two runs per section.
           if(fwrite(line.data(),sizeof(float),ready,files[s])!=ready)throw std::runtime_error("Scratch storage full");
@@ -467,6 +487,22 @@ std::array<std::string,STEMS+1> extract(const std::string&modelPath,const std::s
       }
       std::copy(sum.begin()+STRIDE,sum.end(),sum.begin());
       std::fill(sum.end()-STRIDE,sum.end(),0.f);
+      if(peakColumns>0){
+        // Other is what the five named stems leave of the song, as at the end.
+        for(int c=0;c<2;c++)for(size_t i=0;i<ready;i++){
+          float&col=columns[OTHER][std::min(size_t(peakColumns-1),(written+i)*size_t(peakColumns)/frames)];
+          col=std::max(col,std::abs(rest[size_t(c)*STRIDE+i]));
+        }
+        const size_t first=written*size_t(peakColumns)/frames,last=std::min(size_t(peakColumns-1),(written+ready-1)*size_t(peakColumns)/frames);
+        std::string out;
+        for(int s=0;s<STEMS;s++){
+          out+="PEAKS ";out+=NAMES[s];out+=" "+std::to_string(first)+" ";
+          char v[16];
+          for(size_t b=first;b<=last;b++){snprintf(v,sizeof v,b==first?"%.3f":",%.3f",columns[s][b]);out+=v;}
+          out+="\n";
+        }
+        fputs(out.c_str(),stdout);fflush(stdout);
+      }
       written+=ready;
     }
     model.finish();
@@ -553,6 +589,29 @@ std::array<std::string,STEMS+1> extract(const std::string&modelPath,const std::s
 }
 
 namespace {
+/** The graphics card DirectML will use (the high-performance one), or "" when there is none. */
+std::string bestGpu(){
+#ifdef STEM_DIRECTML
+  IDXGIFactory6*factory=nullptr;
+  if(FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory6),reinterpret_cast<void**>(&factory))))return "";
+  std::string found;
+  for(UINT i=0;;i++){
+    IDXGIAdapter1*adapter=nullptr;
+    if(FAILED(factory->EnumAdapterByGpuPreference(i,DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,__uuidof(IDXGIAdapter1),reinterpret_cast<void**>(&adapter))))break;
+    DXGI_ADAPTER_DESC1 d{};
+    adapter->GetDesc1(&d);
+    adapter->Release();
+    if(d.Flags&DXGI_ADAPTER_FLAG_SOFTWARE)continue;
+    found=utf8(d.Description)+"|"+std::to_string(d.DedicatedVideoMemory/1048576);
+    break;
+  }
+  factory->Release();
+  return found;
+#else
+  return "";
+#endif
+}
+
 const char*arg(int argc,char**argv,const char*name,const char*fallback){
   for(int i=1;i+1<argc;i++)if(strcmp(argv[i],name)==0)return argv[i+1];
   return fallback;
@@ -562,8 +621,18 @@ int run(int argc,char**argv){
   const std::string model=arg(argc,argv,"--model",""),in=arg(argc,argv,"--in",""),out=arg(argc,argv,"--out",""),
      prefix=arg(argc,argv,"--prefix","song"),device=arg(argc,argv,"--device","auto");
   const int start=atoi(arg(argc,argv,"--start","0")),seconds=atoi(arg(argc,argv,"--seconds","0"));
+  peakColumns=std::max(0,std::min(8192,atoi(arg(argc,argv,"--peaks","0"))));
   const int cores=int(std::max(1u,std::thread::hardware_concurrency()));
   const int threads=atoi(arg(argc,argv,"--threads",std::to_string(std::max(1,std::min(cores-1,16))).c_str()));
+  bool probe=false;
+  for(int i=1;i<argc;i++)probe|=strcmp(argv[i],"--probe")==0;
+  if(probe){
+    // What the app shows before a run: the card (name|dedicated MB) and the processor threads.
+    const std::string gpu=bestGpu();
+    printf("GPU %s\nCORES %d\n",gpu.empty()?"none":gpu.c_str(),cores);
+    fflush(stdout);
+    return 0;
+  }
   if(model.empty()||in.empty()||out.empty()){
     fprintf(stderr,"usage: stemengine --model M.onnx --in song.wav --out FOLDER --prefix NAME [--device auto|gpu|cpu]\n");
     return 2;
@@ -588,7 +657,9 @@ int run(int argc,char**argv){
   std::string lastError;
   for(const bool gpu:tries){
     deviceName=gpu?"gpu":"cpu";
-    printf("DEVICE %s\n",deviceName.c_str());fflush(stdout);
+    if(gpu){const std::string card=bestGpu();printf("DEVICE gpu %s\n",card.empty()?"unknown":card.substr(0,card.find('|')).c_str());}
+    else printf("DEVICE cpu %d\n",threads);
+    fflush(stdout);
     try{
       const auto results=extract(model,in,out,prefix,start,seconds,threads,gpu);
       for(int s=0;s<STEMS;s++)printf("STEM %s %s\n",NAMES[s],results[s].c_str());
@@ -608,6 +679,10 @@ int run(int argc,char**argv){
 }
 }
 
+// The stdin watcher may be blocked reading when the run ends; a normal exit would wait on it to tidy the
+// standard streams, so leave at once (output is flushed and every file is already closed).
+[[noreturn]] void leave(int code){fflush(stdout);fflush(stderr);std::_Exit(code);}
+
 #ifdef _WIN32
 int wmain(int argc,wchar_t**wargv){
   std::vector<std::string> keep;
@@ -615,8 +690,8 @@ int wmain(int argc,wchar_t**wargv){
   for(int i=0;i<argc;i++)keep.push_back(utf8(wargv[i]));
   for(auto&k:keep)argv.push_back(&k[0]);
   SetConsoleOutputCP(CP_UTF8);
-  return run(argc,argv.data());
+  leave(run(argc,argv.data()));
 }
 #else
-int main(int argc,char**argv){return run(argc,argv);}
+int main(int argc,char**argv){leave(run(argc,argv));}
 #endif

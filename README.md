@@ -3,6 +3,24 @@
 Standalone **offline** Android stem separator for Galaxy S23 Ultra (arm64).
 Independent application ID `com.dennis.stemstudio`; does not access or modify Dennis AI Mastering Lab.
 
+## Stem Studio for Windows (trial)
+
+`desktop/` is Stem Studio for Windows: the phone's six-stem engine (HT-Demucs 6s, same sections, weights and
+sum) built as a Windows program, with a window designed for the job.
+
+- **Six stems from any song**: Vocals, Drums, Bass, Guitar, Piano and Other, as 48 kHz 24-bit WAV that add back
+  up to the song. WAV directly; MP3, FLAC, M4A and others through the bundled FFmpeg.
+- **Graphics card**: runs on the laptop's separate graphics card through DirectML (the high-performance card is
+  chosen), and falls back to the processor by itself if the card cannot run it.
+- **Lanes**: the original mix splits into six coloured lanes that fill in while it works; solo, mute and a level
+  for each stem, played live together.
+- **Send to Master Room**: a ZIP of the six stems that Master Room opens with Open stems; or save the WAVs anywhere.
+- Stems go to `Documents\Stem Studio\<song>`; opening the same song again brings them back.
+
+Built by `.github/workflows/stem-studio-windows.yml`, which checks it on Windows (separation, the sum, solo and
+mute, Stop, MP3, the ZIP, and the real window driven end to end) and publishes the download as a pre-release.
+Nothing in `app/` changes for it.
+
 ## Status
 
 An Android debug APK for v0.1.0 has built successfully, but actual audio quality, resampling accuracy and app behavior must be verified on the S23 Ultra. This new v0.1.1 export build is also subject to CI and on-device testing.

@@ -1,31 +1,38 @@
 name: Stem Studio for Windows
 
-# The phone's six-stem engine built for Windows (graphics card through DirectML, or the processor),
-# timed and checked on Windows. Nothing in app/ is built or changed here.
+# Stem Studio for Windows: the phone's six-stem engine built for Windows (graphics card through DirectML,
+# or the processor), the app around it, checked on Windows, packaged with Java, the model and FFmpeg, and
+# published as a trial download. Nothing in app/ is built or changed here.
 on:
   workflow_dispatch:
   push:
-    branches: ['feature/windows-desktop']
+    branches: [main, 'feature/windows-desktop']
     paths:
       - 'desktop/**'
       - '.github/workflows/stem-studio-windows.yml'
 
 permissions:
-  contents: read
+  contents: write  # the trial download is published as a GitHub pre-release
 
 env:
+  APP_VERSION: '0.1.0'
   MODEL_URL: 'https://huggingface.co/StemSplitio/htdemucs-6s-onnx/resolve/main/htdemucs_6s_fp16weights.onnx'
+  FFMPEG_REPO: 'BtbN/FFmpeg-Builds'
 
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: ilammy/msvc-dev-cmd@v1
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -37,58 +44,132 @@ jobs:
           echo "ONNX Runtime DirectML $ORT, DirectML $DML" | tee runtime-versions.txt
           curl -fsSL -o ort.zip "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/$ORT/microsoft.ml.onnxruntime.directml.$ORT.nupkg"
           curl -fsSL -o dml.zip "https://api.nuget.org/v3-flatcontainer/microsoft.ai.directml/$DML/microsoft.ai.directml.$DML.nupkg"
-          mkdir -p ort dml build/engine
+          mkdir -p ort dml build/app/engine
           7z x -y -oort ort.zip > /dev/null
           7z x -y -odml dml.zip > /dev/null
-          ls ort/build/native/include ort/runtimes/win-x64/native dml/bin/x64-win
-          cp ort/runtimes/win-x64/native/onnxruntime.dll dml/bin/x64-win/DirectML.dll build/engine/
-          cp ort/LICENSE* build/engine/LICENSE-onnxruntime.txt 2>/dev/null || true
-          cp dml/LICENSE* build/engine/LICENSE-DirectML.txt 2>/dev/null || true
+          cp ort/runtimes/win-x64/native/onnxruntime.dll dml/bin/x64-win/DirectML.dll build/app/engine/
+          cp "$(ls ort/LICENSE* | head -1)" build/app/engine/LICENSE-onnxruntime.txt
+          cp "$(ls dml/LICENSE* | head -1)" build/app/engine/LICENSE-DirectML.txt
 
       - name: Compile the engine
         shell: cmd
         run: |
-          cl /nologo /O2 /EHsc /std:c++17 /utf-8 /W3 /DSTEM_DIRECTML /Iort\build\native\include desktop\engine\stem_engine.cpp /Fe:build\engine\stemengine.exe /link /LIBPATH:ort\runtimes\win-x64\native onnxruntime.lib psapi.lib
+          cl /nologo /O2 /EHsc /std:c++17 /utf-8 /W3 /DSTEM_DIRECTML /Iort\build\native\include desktop\engine\stem_engine.cpp /Fe:build\app\engine\stemengine.exe /link /LIBPATH:ort\runtimes\win-x64\native onnxruntime.lib psapi.lib dxgi.lib
           if errorlevel 1 exit /b 1
-          dir build\engine
+          del build\app\engine\stemengine.obj 2>nul
+          build\app\engine\stemengine.exe --probe
+
+      - name: Compile the app and its checks
+        run: |
+          mkdir -p build/classes/fonts build/check
+          javac -nowarn -encoding UTF-8 --release 21 -d build/classes $(find desktop/src -name '*.java')
+          cp desktop/fonts/*.otf build/classes/fonts/
+          javac -nowarn -encoding UTF-8 --release 21 -cp build/classes -d build/check $(find desktop/check -name '*.java')
 
       - name: The six-stem model (HT-Demucs 6s, MIT)
         run: |
-          mkdir -p models
-          curl -fLsS --retry 3 "$MODEL_URL" -o models/htdemucs_6s.onnx
-          ls -la models; sha256sum models/*
+          mkdir -p build/app/models
+          curl -fLsS --retry 3 "$MODEL_URL" -o build/app/models/htdemucs_6s.onnx
+          ls -la build/app/models; sha256sum build/app/models/*
 
-      - name: A test song (synthetic, 70 seconds)
+      - name: FFmpeg (LGPL), for MP3, FLAC, M4A and the rest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NAME=$(gh release view latest -R "$FFMPEG_REPO" --json assets --jq '.assets[].name' | grep -E '^ffmpeg-n[0-9.]+-latest-win64-lgpl-[0-9.]+\.zip$' | sort -V | tail -1)
+          test -n "$NAME"
+          echo "FFmpeg build: $NAME" | tee ffmpeg-build.txt
+          gh release download latest -R "$FFMPEG_REPO" -p "$NAME" -O ffmpeg.zip
+          mkdir -p ffx build/app/ffmpeg
+          7z x -y -offx ffmpeg.zip > /dev/null
+          cp ffx/*/bin/ffmpeg.exe build/app/ffmpeg/
+          cp ffx/*/LICENSE.txt build/app/ffmpeg/LICENSE-FFmpeg-LGPL.txt
+
+      - name: Test songs (synthetic, 70 seconds; WAV and MP3)
         run: |
           pip install --disable-pip-version-check -q numpy scipy
           python experiments/four-stem/bench/make_song.py song.wav 70
+          build/app/ffmpeg/ffmpeg.exe -hide_banner -v error -y -i song.wav -b:a 192k song.mp3
 
-      - name: Separate 60 seconds on the processor (time, memory, the sum)
+      - name: Checks (separate, the sum, solo and mute, Stop, MP3, the ZIP for Master Room)
         run: |
           set -o pipefail
-          mkdir -p out-cpu
-          nproc || echo "$NUMBER_OF_PROCESSORS cores"
-          start=$(date +%s)
-          build/engine/stemengine.exe --model models/htdemucs_6s.onnx --in song.wav --out out-cpu --prefix s --device cpu --seconds 60 | grep -v '^SECTION [1-9]' | tee engine-cpu.txt
-          echo "Wall time: $(( $(date +%s) - start )) s" | tee -a engine-cpu.txt
-          grep -q '^DONE' engine-cpu.txt
-          python experiments/six-stem/check_sum.py song.wav out-cpu s | tee -a engine-cpu.txt
+          E="-Dstemstudio.engine=build/app/engine/stemengine.exe -Dstemstudio.model=build/app/models/htdemucs_6s.onnx -Dstemstudio.ffmpeg=build/app/ffmpeg/ffmpeg.exe"
+          java $E -cp "build/classes;build/check" StudioCheck song.wav song.mp3 | tee studio-check.txt
+          grep -q STUDIO_CHECK_PASS studio-check.txt
 
-      - name: Separate 10 seconds through DirectML (the runner has no real graphics card; this proves the path)
+      - name: The real window, driven (open, separate, mute, send to Master Room)
+        run: |
+          set -o pipefail
+          E="-Dstemstudio.engine=build/app/engine/stemengine.exe -Dstemstudio.model=build/app/models/htdemucs_6s.onnx -Dstemstudio.ffmpeg=build/app/ffmpeg/ffmpeg.exe -Dstemstudio.out=window-out"
+          cp song.wav "Dusty Road.wav"
+          java $E -cp "build/classes;build/check" com.dennis.stemstudio.desktop.WindowCheck "Dusty Road.wav" . | tee window-check.txt
+          grep -q WINDOW_CHECK_PASS window-check.txt
+
+      - name: Screenshots of the design (sample data) and the icon
+        run: |
+          for st in empty ready separating done; do java -cp build/classes com.dennis.stemstudio.desktop.Main --screenshot window-$st.png --state $st; done
+          java -cp build/classes com.dennis.stemstudio.desktop.AppIcon build/StemStudio.ico icon-preview.png
+
+      - name: Package (Java, the engine, the model and FFmpeg included)
+        run: |
+          cp desktop/WINDOWS_NOTICES.txt desktop/fonts/OFL-Inter.txt build/app/
+          jar --create --file build/app/stemstudio.jar --main-class com.dennis.stemstudio.desktop.Main -C build/classes .
+          jpackage --type app-image --name "Stem Studio" --dest build/dist \
+            --input build/app --main-jar stemstudio.jar --main-class com.dennis.stemstudio.desktop.Main \
+            --app-version "$APP_VERSION" --vendor "Dennis" --description "Stem Studio: six stems from any song" \
+            --java-options "-Xmx2g" --java-options "-Dfile.encoding=UTF-8" --icon build/StemStudio.ico
+          A="build/dist/Stem Studio/app"
+          test -f "$A/engine/stemengine.exe" && test -f "$A/models/htdemucs_6s.onnx" && test -f "$A/ffmpeg/ffmpeg.exe"
+          "$A/engine/stemengine.exe" --probe
+          cd build/dist && 7z a -tzip "../../StemStudio-Windows-$APP_VERSION.zip" "Stem Studio" > /dev/null
+          cd - > /dev/null; ls -la StemStudio-Windows-*.zip
+
+      - name: The packaged engine separates 10 seconds from its own folder
+        run: |
+          set -o pipefail
+          A="build/dist/Stem Studio/app"
+          mkdir -p packaged-out
+          "$A/engine/stemengine.exe" --model "$A/models/htdemucs_6s.onnx" --in song.wav --out packaged-out --prefix p --seconds 10 | grep -v '^PEAKS' | tee packaged.txt
+          grep -q '^DONE' packaged.txt
+          test "$(ls packaged-out/*.wav | wc -l)" = 6
+
+      - name: Installer (MSI, per user)
         continue-on-error: true
         run: |
-          set -o pipefail
-          mkdir -p out-gpu
-          start=$(date +%s)
-          build/engine/stemengine.exe --model models/htdemucs_6s.onnx --in song.wav --out out-gpu --prefix s --device auto --seconds 10 | grep -v '^SECTION [1-9]' | tee engine-gpu.txt
-          echo "Wall time: $(( $(date +%s) - start )) s" | tee -a engine-gpu.txt
+          jpackage --type msi --name "Stem Studio" --dest build/msi \
+            --input build/app --main-jar stemstudio.jar --main-class com.dennis.stemstudio.desktop.Main \
+            --app-version "$APP_VERSION" --vendor "Dennis" --description "Stem Studio: six stems from any song" \
+            --java-options "-Xmx2g" --java-options "-Dfile.encoding=UTF-8" --icon build/StemStudio.ico \
+            --win-per-user-install --win-menu --win-shortcut --win-dir-chooser --win-upgrade-uuid 6f1b7c1e-2a55-4c3e-9d1e-5e7a0c2b9f41
+          cp build/msi/*.msi "StemStudio-Windows-$APP_VERSION.msi"
+
+      - name: Trial download (a GitHub pre-release, so the link works without signing in)
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="stem-studio-windows-v$APP_VERSION"
+          FILES=$(ls StemStudio-Windows-*.zip StemStudio-Windows-*.msi 2>/dev/null)
+          NOTES="Stem Studio for Windows $APP_VERSION (trial). Install with the MSI, or unzip and run Stem Studio.exe. Built from ${GITHUB_SHA::7} on $GITHUB_REF_NAME."
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" $FILES --clobber
+            gh release edit "$TAG" --notes "$NOTES" --prerelease
+          else
+            gh release create "$TAG" $FILES --prerelease --target "$GITHUB_SHA" --title "Stem Studio for Windows $APP_VERSION (trial)" --notes "$NOTES"
+          fi
+          echo "Download: https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: StemStudio-Windows-engine
+          name: StemStudio-Windows-checks
           path: |
-            build/engine
-            engine-*.txt
+            studio-check.txt
+            window-check.txt
+            packaged.txt
             runtime-versions.txt
+            ffmpeg-build.txt
+            window-*.png
+            icon-preview.png
           retention-days: 30
