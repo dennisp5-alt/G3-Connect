@@ -71,11 +71,22 @@ for n in g.node:
         p = producer.get(i)
         if p is None or p.name not in tail:
             boundary.append(i)
-print('TAIL steps', len(tail), 'of', len(g.node))
+print('TAIL steps', len(tail), 'of', len(g.node), '(of which constant-only:', len(tail & const), ')')
 print('BOUNDARY', boundary)
 
 head_outputs = [b for b in boundary if b not in graph_inputs]
+# Shape inference cannot follow every step of this model, so the crossing tensors may have no
+# recorded type; they are float activations (weights are cast to float before use). The check
+# below runs both halves, so a wrong type would fail there.
+known = {v.name for v in list(g.value_info) + list(g.input) + list(g.output)}
+for b in boundary:
+    if b not in known:
+        g.value_info.append(onnx.helper.make_tensor_value_info(b, onnx.TensorProto.FLOAT, None))
 e = utils.Extractor(model)
+known = {v.name for v in list(e.graph.value_info) + list(e.graph.input) + list(e.graph.output)}
+for b in boundary:
+    if b not in e.vimap:
+        e.vimap[b] = onnx.helper.make_tensor_value_info(b, onnx.TensorProto.FLOAT, None)
 head = e.extract_model(graph_inputs, head_outputs)
 tailm = e.extract_model(boundary, graph_outputs)
 onnx.save(head, head_path)
