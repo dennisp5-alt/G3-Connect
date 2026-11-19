@@ -105,6 +105,8 @@ jobs:
           grep -q BENCHMARK_CHECK_PASS benchmark.txt
 
       - name: Package (portable "Stem Studio Experimental", own settings)
+        env:
+          MSYS_NO_PATHCONV: '1'
         run: |
           cp desktop/WINDOWS_NOTICES.txt desktop/fonts/OFL-Inter.txt build/app/
           jar --create --file build/app/stemstudio.jar --main-class com.dennis.stemstudio.desktop.Main -C build/classes .
@@ -113,7 +115,12 @@ jobs:
             --input build/app --main-jar stemstudio.jar --main-class com.dennis.stemstudio.desktop.Main \
             --app-version "$APP_VERSION" --vendor "Dennis" --description "Stem Studio experimental: hybrid processing benchmark" \
             --java-options "-Xmx2g" --java-options "-Dfile.encoding=UTF-8" --java-options "-Dstemstudio.experimental=1" \
-            --java-options "-Dstemstudio.prefs=/com/dennis/stemstudio/experimental" --icon build/StemStudio.ico
+            --java-options "-Dstemstudio.prefs=com/dennis/stemstudio/experimental" --icon build/StemStudio.ico
+          # Git Bash rewrites arguments that look like /paths into C:/Program Files/Git/...: check what the launcher got.
+          CFG="build/dist/Stem Studio Experimental/app/Stem Studio Experimental.cfg"; cat "$CFG"
+          ! grep -q "Program Files/Git" "$CFG"
+          # And that the packaged app starts: it draws a sample window and exits.
+          "build/dist/Stem Studio Experimental/runtime/bin/java.exe" -Dstemstudio.experimental=1 -cp "build/dist/Stem Studio Experimental/app/stemstudio.jar" com.dennis.stemstudio.desktop.Main --screenshot launch-check.png --state done
           cd build/dist && 7z a -tzip "../../StemStudio-Experimental-$APP_VERSION.zip" "Stem Studio Experimental" > /dev/null
           cd - > /dev/null; ls -la StemStudio-Experimental-*.zip
 
