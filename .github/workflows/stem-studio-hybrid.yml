@@ -10,6 +10,7 @@ on:
     paths:
       - 'desktop/**'
       - '.github/workflows/stem-studio-hybrid.yml'
+      - 'experiments/hybrid/**'
 
 permissions:
   contents: write  # the experimental download is a GitHub pre-release
