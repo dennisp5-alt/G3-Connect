@@ -33,12 +33,12 @@ class StudioWindow {
     final Ui.Words deviceNote = new Ui.Words("", Theme.body(12.5f), Theme.DIM, 2);
     final Ui.Btn separate = new Ui.Btn("Separate into six stems", Ui.Kind.PRIMARY);
     final Bar bar = new Bar();
-    final Ui.Words progressText = new Ui.Words("", Theme.body(13f), Theme.MID, 2);
+    final Ui.Words progressText = new Ui.Words("", Theme.body(13f), Theme.MID, 4);
     // Use card.
     final Ui.Card useCard = new Ui.Card("Use the stems");
     final Ui.Btn toMasterRoom = new Ui.Btn("Send to Master Room", Ui.Kind.PRIMARY);
     final Ui.Btn saveWavs = new Ui.Btn("Save the six WAV files", Ui.Kind.SECONDARY);
-    final Ui.Words savedWhere = new Ui.Words("", Theme.body(12.5f), Theme.DIM, 2);
+    final Ui.Words savedWhere = new Ui.Words("", Theme.body(12.5f), Theme.DIM, 3);
     final Ui.Btn openFolder = new Ui.Btn("Open the folder", Ui.Kind.GHOST);
 
     StudioWindow() {

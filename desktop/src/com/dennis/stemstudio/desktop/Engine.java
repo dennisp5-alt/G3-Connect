@@ -97,10 +97,12 @@ final class Engine {
         running = p;
         File[] stems = new File[6];
         String error = null, done = null;
+        StringBuilder log = new StringBuilder(String.format("%n%s  %s  (%s)%n", java.time.LocalDateTime.now().withNano(0), wav.getName(), gpu ? "graphics card first" : "processor"));
         boolean onGpu = false;
         try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
             String line;
             while ((line = r.readLine()) != null) {
+                if (!line.startsWith("PEAKS ") && !line.startsWith("SECTION ") && !line.startsWith("STAGE ")) log.append(line).append(System.lineSeparator());
                 if (line.startsWith("PEAKS ")) {
                     String[] parts = line.split(" ", 4);
                     if (parts.length == 4) {
@@ -136,6 +138,7 @@ final class Engine {
             throw new IOException("Stopped");
         } finally {
             running = null;
+            keepLog(log.toString());
         }
         if (done == null) throw new IOException(error != null ? error : "The engine stopped without finishing (exit " + (p.isAlive() ? "?" : p.exitValue()) + ")");
         for (File f : stems) if (f == null || !f.isFile()) throw new IOException("A stem is missing after separating");
@@ -144,6 +147,21 @@ final class Engine {
         int sections = 0; double ai = 0; long mb = 0;
         try { sections = Integer.parseInt(d[1]); ai = Double.parseDouble(d[4]); mb = Long.parseLong(d[5]); } catch (RuntimeException ignored) { }
         return new Result(stems, sections, d.length > 2 && d[2].equals("gpu"), ai, mb);
+    }
+
+    /**
+     * What the engine said on each run (devices, why the graphics card was not used, errors), kept in
+     * Documents\Stem Studio\engine log.txt so a problem can be looked into afterwards. Kept short.
+     */
+    static void keepLog(String text) {
+        try {
+            File f = new File(Places.root(), "engine log.txt");
+            f.getParentFile().mkdirs();
+            String old = f.isFile() ? java.nio.file.Files.readString(f.toPath(), StandardCharsets.UTF_8) : "";
+            String all = old + text;
+            if (all.length() > 100_000) all = all.substring(all.length() - 100_000);
+            java.nio.file.Files.writeString(f.toPath(), all, StandardCharsets.UTF_8);
+        } catch (IOException ignored) { }
     }
 
     /** Asks the engine to stop at the end of the part it is on (it tidies up its temporary files). */

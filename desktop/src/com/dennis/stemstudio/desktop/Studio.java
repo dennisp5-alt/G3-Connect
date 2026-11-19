@@ -188,12 +188,14 @@ final class Studio {
         final String prefix = Places.safe(s.title);
         job = new Thread(() -> {
             long[] firstSection = {0};
+            String[] whyNotGpu = {null};
             try {
                 Engine.Result r = Engine.separate(input, out, prefix, gpu, Demo.N, new Engine.Listener() {
                     @Override public void device(boolean g, String name) {
                         ui(() -> s.stageText = g ? "Starting on the graphics card" : "Starting on the processor");
                     }
                     @Override public void fellBack(String why) {
+                        whyNotGpu[0] = why;
                         ui(() -> s.result = "The graphics card could not run it, so the processor is doing it instead.");
                     }
                     @Override public void section(int done, int total) {
@@ -229,8 +231,10 @@ final class Studio {
                 });
                 double took = (System.nanoTime() - started) / 1e9;
                 PREFS.putDouble(r.gpu() ? "speed.gpu" : "speed.cpu", took / Math.max(1, s.seconds));
-                ui(() -> useStems(r.stems(), "Done in " + Session.duration(took).replace("about ", "") + " on the " + (r.gpu() ? "graphics card" : "processor")
-                    + ". The six stems add back up to the song."));
+                String done = "Done in " + Session.duration(took) + " on the " + (r.gpu() ? "graphics card" : "processor") + ".";
+                String result = whyNotGpu[0] == null ? done + " The six stems add back up to the song."
+                    : done + " The graphics card could not run it: " + plain(whyNotGpu[0]);
+                ui(() -> useStems(r.stems(), result));
             } catch (IOException e) {
                 ui(() -> {
                     boolean stopped = message(e).contains("Cancel") || message(e).equals("Stopped");
@@ -365,6 +369,12 @@ final class Studio {
 
     private static void ui(Runnable r) {
         SwingUtilities.invokeLater(() -> { r.run(); });
+    }
+
+    /** The engine's reason, without the runtime's source-file noise, short enough for the panel. */
+    static String plain(String why) {
+        String s = why.replace("AI runtime: ", "").replaceAll("[A-Z]:\\\\[^ ]*\\.(cc|cpp|h)\\(\\d+\\)\\S*", "").replaceAll("\\(caller: [^)]*\\)", "").replaceAll("Exception\\(\\d+\\) tid\\([0-9a-fA-F]+\\)", "").replaceAll("\\s+", " ").trim();
+        return s.length() > 160 ? s.substring(0, 157) + "…" : s;
     }
 
     static String message(Throwable e) {

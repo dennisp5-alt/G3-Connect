@@ -15,7 +15,7 @@ permissions:
   contents: write  # the trial download is published as a GitHub pre-release
 
 env:
-  APP_VERSION: '0.1.0'
+  APP_VERSION: '0.1.1'
   MODEL_URL: 'https://huggingface.co/StemSplitio/htdemucs-6s-onnx/resolve/main/htdemucs_6s_fp16weights.onnx'
   FFMPEG_REPO: 'BtbN/FFmpeg-Builds'
 

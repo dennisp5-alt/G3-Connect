@@ -38,6 +38,8 @@
 #include <dxgi1_6.h>
 #endif
 
+int adapterIndex();  // below: the graphics card's adapter number
+
 namespace {
 #ifdef _WIN32
 std::wstring wide(const std::string&s){
@@ -233,8 +235,11 @@ std::string deviceName;
 
 class Model {
 public:
-  // useGpu: DirectML on the first graphics card (the CPU runs any part the card cannot).
-  Model(const std::string&path,int threads,bool useGpu):api(OrtGetApiBase()->GetApi(ORT_API_VERSION)){
+  // gpu: 0 the processor; 2 DirectML on the high-performance card, fully optimised; 1 DirectML on that card
+  // by its adapter number, basic optimisation (a second way in when the first fails). The processor runs
+  // any part the card cannot.
+  Model(const std::string&path,int threads,int gpu):api(OrtGetApiBase()->GetApi(ORT_API_VERSION)){
+    const bool useGpu=gpu>0;
     if(!api)throw std::runtime_error("The AI runtime is the wrong version");
     check(api->CreateEnv(ORT_LOGGING_LEVEL_ERROR,"six-stem",&env));
     check(api->CreateSessionOptions(&options));
@@ -245,16 +250,18 @@ public:
     check(api->DisableMemPattern(options));
     // On the phone any graph optimization made loading peak at 6.1 GB. A computer has room for the
     // basic level (about 30% faster per section on the processor); the full level is no faster here.
-    check(api->SetSessionGraphOptimizationLevel(options,useGpu?ORT_ENABLE_ALL:ORT_ENABLE_BASIC));
+    check(api->SetSessionGraphOptimizationLevel(options,gpu==2?ORT_ENABLE_ALL:ORT_ENABLE_BASIC));
 #ifdef STEM_DIRECTML
     if(useGpu){
       // The fastest card (on a laptop, the separate graphics card rather than the one in the processor).
       const OrtDmlApi*dml=nullptr;
       check(api->GetExecutionProviderApi("DML",ORT_API_VERSION,reinterpret_cast<const void**>(&dml)));
-      OrtDmlDeviceOptions choice{};
-      choice.Preference=OrtDmlPerformancePreference::HighPerformance;
-      choice.Filter=OrtDmlDeviceFilter::Gpu;
-      check(dml->SessionOptionsAppendExecutionProvider_DML2(options,&choice));
+      if(gpu==2){
+        OrtDmlDeviceOptions choice{};
+        choice.Preference=OrtDmlPerformancePreference::HighPerformance;
+        choice.Filter=OrtDmlDeviceFilter::Gpu;
+        check(dml->SessionOptionsAppendExecutionProvider_DML2(options,&choice));
+      }else check(dml->SessionOptionsAppendExecutionProvider_DML(options,adapterIndex()));
     }
 #else
     if(useGpu)throw std::runtime_error("This engine was built without graphics card support");
@@ -375,7 +382,7 @@ void readAll(const std::string&path,float*left,float*right,size_t n){
 }
 
 std::array<std::string,STEMS+1> extract(const std::string&modelPath,const std::string&wav,
-  const std::string&folder,const std::string&prefix,int start,int duration,int threads,bool useGpu){
+  const std::string&folder,const std::string&prefix,int start,int duration,int threads,int useGpu){
   if(busy.exchange(true))throw std::runtime_error("Already separating");
   struct Guard{~Guard(){busy.store(false);cancelled.store(false);}}guard;
   cancelled.store(false);
@@ -613,6 +620,31 @@ std::string bestGpu(){
 #endif
 }
 
+}
+/** The high-performance card's place in Windows' plain adapter list (what DirectML's device number means). */
+int adapterIndex(){
+#ifdef STEM_DIRECTML
+  const std::string best=bestGpu();
+  if(best.empty())return 0;
+  const std::string name=best.substr(0,best.find('|'));
+  IDXGIFactory1*factory=nullptr;
+  if(FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1),reinterpret_cast<void**>(&factory))))return 0;
+  int found=0;
+  for(UINT i=0;;i++){
+    IDXGIAdapter1*adapter=nullptr;
+    if(factory->EnumAdapters1(i,&adapter)==DXGI_ERROR_NOT_FOUND)break;
+    DXGI_ADAPTER_DESC1 d{};
+    adapter->GetDesc1(&d);
+    adapter->Release();
+    if(utf8(d.Description)==name){found=int(i);break;}
+  }
+  factory->Release();
+  return found;
+#else
+  return 0;
+#endif
+}
+namespace {
 const char*arg(int argc,char**argv,const char*name,const char*fallback){
   for(int i=1;i+1<argc;i++)if(strcmp(argv[i],name)==0)return argv[i+1];
   return fallback;
@@ -648,15 +680,16 @@ int run(int argc,char**argv){
     stopAsked.store(true);
     cancelled.store(true);
   }).detach();
-  std::vector<bool> tries;
+  std::vector<int> tries;
 #ifdef STEM_DIRECTML
-  if(device!="cpu")tries.push_back(true);
+  if(device!="cpu"&&!bestGpu().empty()){tries.push_back(2);tries.push_back(1);}
 #else
-  if(device=="gpu")tries.push_back(true);
+  if(device=="gpu")tries.push_back(2);
 #endif
-  if(device!="gpu")tries.push_back(false);
+  if(device!="gpu"||tries.empty())tries.push_back(0);
   std::string lastError;
-  for(const bool gpu:tries){
+  for(size_t t=0;t<tries.size();t++){
+    const int gpu=tries[t];
     deviceName=gpu?"gpu":"cpu";
     if(gpu){const std::string card=bestGpu();printf("DEVICE gpu %s\n",card.empty()?"unknown":card.substr(0,card.find('|')).c_str());}
     else printf("DEVICE cpu %d\n",threads);
@@ -671,7 +704,7 @@ int run(int argc,char**argv){
       lastError=e.what();
       if(stopAsked.load())break;
       // The graphics card could not run it (no DirectX 12 card, driver, memory): try the processor.
-      if(gpu&&tries.size()>1){printf("FALLBACK %s\n",lastError.c_str());fflush(stdout);continue;}
+      if(gpu&&t+1<tries.size()){printf("FALLBACK %s\n",lastError.c_str());fflush(stdout);continue;}
     }
   }
   printf("ERROR %s\n",stopAsked.load()?"Cancelled":lastError.c_str());
