@@ -78,6 +78,13 @@ jobs:
           cp ffx/*/bin/ffmpeg.exe build/app/ffmpeg/
           cp ffx/*/LICENSE.txt build/app/ffmpeg/LICENSE-FFmpeg-LGPL.txt
 
+      - name: Split the model at the inverse STFT (card head, processor tail), checked on the processor
+        run: |
+          pip install --disable-pip-version-check -q numpy scipy onnx onnxruntime
+          python experiments/hybrid/split_model.py build/app/models/htdemucs_6s.onnx build/app/models/htdemucs_6s_head.onnx build/app/models/htdemucs_6s_tail.onnx | tee split.txt
+          grep -q SPLIT_PASS split.txt
+          ls -la build/app/models
+
       - name: Test song (synthetic, 70 seconds, 48 kHz)
         run: |
           pip install --disable-pip-version-check -q numpy scipy
@@ -96,6 +103,11 @@ jobs:
           done; done | tee -a modes.txt
           ! grep -q '^DIFF' modes.txt
           python experiments/six-stem/check_sum.py song.wav out-pipelined m | tee -a modes.txt
+          # The split model on the processor (head and tail both there): same stems as the whole model?
+          mkdir -p out-split
+          $E --model build/app/models/htdemucs_6s_head.onnx --tail build/app/models/htdemucs_6s_tail.onnx --in song.wav --out out-split --prefix m --device cpu --mode serial --seconds 60 --monitor | grep -E '^(TIMING|STATS|ERROR|DONE)' | tee -a modes.txt
+          python experiments/hybrid/compare_wavs.py out-serial out-split split | tee -a modes.txt
+          python experiments/six-stem/check_sum.py song.wav out-split m | tee -a modes.txt
 
       - name: The app's benchmark, as the button runs it
         run: |
@@ -143,6 +155,7 @@ jobs:
           name: StemStudio-hybrid-results
           path: |
             modes.txt
+            split.txt
             benchmark.txt
             runtime-versions.txt
           retention-days: 30

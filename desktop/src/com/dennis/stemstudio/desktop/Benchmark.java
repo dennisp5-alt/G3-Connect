@@ -25,20 +25,29 @@ import java.util.function.Consumer;
 final class Benchmark {
     private Benchmark() {}
 
-    record Way(String label, List<String> args, boolean gpu) {}
+    record Way(String label, List<String> args, boolean gpu, boolean split) {
+        Way(String label, List<String> args, boolean gpu) { this(label, args, gpu, false); }
+    }
+
+    /** The model split at the inverse STFT: the head for the card, the tail for the processor (built by CI). */
+    static File head() { return new File(Engine.model().getParentFile(), "htdemucs_6s_head.onnx"); }
+    static File tail() { return new File(Engine.model().getParentFile(), "htdemucs_6s_tail.onnx"); }
+    static boolean canSplit() { return head().isFile() && tail().isFile(); }
 
     /** The runs, in order. Card runs get a cool-down first, so heat from one run does not slow the next. */
     static List<Way> ways(boolean hasGpu) {
         List<Way> w = new ArrayList<>();
         w.add(new Way("Processor, serial (reference)", List.of("--device", "cpu", "--mode", "serial"), false));
         w.add(new Way("Processor, pipelined", List.of("--device", "cpu", "--mode", "pipelined"), false));
-        if (hasGpu) {
-            w.add(new Way("Card fused, serial", List.of("--device", "gpu", "--gpu-way", "fused", "--mode", "serial"), true));
-            w.add(new Way("Card unfused, serial", List.of("--device", "gpu", "--gpu-way", "unfused", "--mode", "serial"), true));
-            w.add(new Way("Card unfused, pipelined", List.of("--device", "gpu", "--gpu-way", "unfused", "--mode", "pipelined"), true));
-            w.add(new Way("Card + processor, parallel", List.of("--device", "gpu", "--gpu-way", "unfused", "--mode", "parallel"), true));
-            w.add(new Way("Card fused, pipelined", List.of("--device", "gpu", "--gpu-way", "fused", "--mode", "pipelined"), true));
+        if (hasGpu && canSplit()) {
+            // The model split in two: everything up to the inverse STFT on the card, the rest on the processor.
+            w.add(new Way("Split fused, serial", List.of("--device", "gpu", "--gpu-way", "fused", "--mode", "serial"), true, true));
+            w.add(new Way("Split unfused, serial", List.of("--device", "gpu", "--gpu-way", "unfused", "--mode", "serial"), true, true));
+            w.add(new Way("Split fused, overlapped", List.of("--device", "gpu", "--gpu-way", "fused", "--mode", "pipelined"), true, true));
+            w.add(new Way("Split unfused, overlapped", List.of("--device", "gpu", "--gpu-way", "unfused", "--mode", "pipelined"), true, true));
+            w.add(new Way("Split fused + CPU sections", List.of("--device", "gpu", "--gpu-way", "fused", "--mode", "parallel"), true, true));
         }
+        if (hasGpu) w.add(new Way("Whole model on card, fused", List.of("--device", "gpu", "--gpu-way", "fused", "--mode", "serial"), true));
         return w;
     }
 
@@ -89,16 +98,18 @@ final class Benchmark {
             if (i == 0) reference = r;
             if (r.ok && reference != null && reference.ok && r != reference) r.match = compare(reference.stems, r.stems);
             // The card's own reference: the pipelined and parallel card runs against the card's serial run.
-            Run cardSerial = runs.stream().filter(x -> x.way.label().equals("Card unfused, serial") && x.ok).findFirst().orElse(null);
-            if (r.ok && cardSerial != null && r != cardSerial && r.way.label().contains("unfused") || r.ok && cardSerial != null && r.way.label().startsWith("Card + processor"))
-                r.match2 = compare(cardSerial.stems, r.stems);
+            // Each overlapped split run against the serial split run on the same card way (same devices, so any
+            // difference is the overlapping's).
+            String serialLabel = r.way.label().replace("overlapped", "serial").replace(" + CPU sections", ", serial");
+            Run cardSerial = runs.stream().filter(x -> x.way.label().equals(serialLabel) && x.ok).findFirst().orElse(null);
+            if (r.ok && cardSerial != null && r != cardSerial) r.match2 = compare(cardSerial.stems, r.stems);
         }
         // Where the card's steps ran, on 10 seconds with profiling (which slows it, so it is timed apart).
         Run placement = null;
         if (probe.hasGpu() && !stopped) {
             said.accept("Profiling which device runs each step (10 seconds)");
             String prefix = new File(root, "profile").getAbsolutePath();
-            placement = one(new Way("Profile, card unfused", List.of("--device", "gpu", "--gpu-way", "unfused", "--mode", "serial", "--profile", prefix), true),
+            placement = one(new Way("Profile, split fused", List.of("--device", "gpu", "--gpu-way", "fused", "--mode", "serial", "--profile", prefix), true, canSplit()),
                 wav, new File(root, "profile"), start, 10, null);
         }
         File report = new File(root, "benchmark report.txt");
@@ -109,9 +120,10 @@ final class Benchmark {
     private static Run one(Way way, File wav, File out, int start, int seconds, Consumer<String> lines) {
         Run r = new Run(way);
         out.mkdirs();
-        List<String> cmd = new ArrayList<>(List.of(Engine.exe().getAbsolutePath(), "--model", Engine.model().getAbsolutePath(), "--in", wav.getAbsolutePath(),
+        List<String> cmd = new ArrayList<>(List.of(Engine.exe().getAbsolutePath(), "--model", (way.split() ? head() : Engine.model()).getAbsolutePath(), "--in", wav.getAbsolutePath(),
             "--out", out.getAbsolutePath(), "--prefix", "b", "--start", String.valueOf(start), "--seconds", String.valueOf(seconds), "--monitor", "--watch-stdin"));
         cmd.addAll(way.args());
+        if (way.split()) cmd.addAll(List.of("--tail", tail().getAbsolutePath()));
         long t0 = System.nanoTime();
         StringBuilder log = new StringBuilder(String.format("%n%s  benchmark: %s%n", LocalDateTime.now().withNano(0), way.label()));
         try {
@@ -207,7 +219,9 @@ final class Benchmark {
         }
         b.append("\nTotal = the engine's own time from opening the song to the last file. AI = time inside the model.\n");
         b.append("Tail = 48 kHz conversion and writing that the serial way leaves until the end.\n");
-        b.append("CPU % = the whole processor, all threads. VRAM and Shared = this run's own card memory, from DirectX.\n\n");
+        b.append("CPU % = the whole processor, all threads. VRAM and Shared = this run's own card memory, from DirectX.\n");
+        b.append("Split = the model cut at the inverse STFT: the card runs the first part, the processor the last.\n");
+        b.append("Overlapped = the card starts the next section while the processor finishes the last one.\n\n");
         b.append("Files against the reference run:\n");
         for (Run r : runs) if (r.ok && r != reference) b.append("  ").append(r.way.label()).append(": ").append(r.match).append('\n');
         boolean any = false;
@@ -218,7 +232,8 @@ final class Benchmark {
         b.append("\nStage times (seconds):\n");
         for (Run r : runs) if (r.ok) b.append("  ").append(r.way.label()).append(": ").append(r.timing).append('\n');
         if (placement != null) {
-            b.append("\nWhere each step ran (card unfused, 10 s, profiled):\n");
+            b.append("\nWhere each step ran (" + placement.way.label() + ", 10 s, profiled):\n");
+            if (placement.ok) b.append("  ").append("card part ").append(placement.timing.getOrDefault("split_head", "-")).append(" s, processor part ").append(placement.timing.getOrDefault("split_tail", "-")).append(" s\n");
             if (!placement.ok) b.append("  did not run: ").append(Studio.plain(placement.error)).append('\n');
             for (String p : placement.placement) b.append("  ").append(p).append('\n');
         }

@@ -11,6 +11,7 @@
 #include <iostream>
 #include <condition_variable>
 #include <map>
+#include <deque>
 #include <mutex>
 #include <functional>
 #ifdef _WIN32
@@ -245,6 +246,8 @@ private:
 // build: left on, the runtime holds on to all its working memory and adds more.
 std::string deviceName;
 std::string profilePrefix;   // --profile: ONNX Runtime writes a per-node timing file (which device ran each step)
+std::string tailPath;        // --tail: the model split in two; the tail (inverse STFT onwards) runs on the processor
+int tailThreads=4;
 
 class Model {
 public:
@@ -298,15 +301,96 @@ public:
     check(api->CreateCpuMemoryInfo(OrtDeviceAllocator,OrtMemTypeDefault,&memory));
     OrtAllocator*allocator=nullptr;
     check(api->GetAllocatorWithDefaultOptions(&allocator));
-    char*in=nullptr,*out=nullptr;
+    char*in=nullptr;
     check(api->SessionGetInputName(session,0,allocator,&in));
-    check(api->SessionGetOutputName(session,0,allocator,&out));
-    inputName=in;outputName=out;
+    inputName=in;
     check(api->AllocatorFree(allocator,in));
-    check(api->AllocatorFree(allocator,out));
+    size_t outs=0;
+    check(api->SessionGetOutputCount(session,&outs));
+    for(size_t i=0;i<outs;i++){
+      char*o=nullptr;check(api->SessionGetOutputName(session,i,allocator,&o));headOutputs.push_back(o);check(api->AllocatorFree(allocator,o));
+    }
+    outputName=headOutputs.at(0);
+    if(!tailPath.empty()){
+      // The tail always runs on the processor, with its own threads.
+      check(api->CreateSessionOptions(&tailOptions));
+      check(api->SetIntraOpNumThreads(tailOptions,tailThreads));
+      check(api->SetInterOpNumThreads(tailOptions,1));
+      check(api->SetSessionExecutionMode(tailOptions,ORT_SEQUENTIAL));
+      check(api->SetSessionGraphOptimizationLevel(tailOptions,ORT_ENABLE_BASIC));
+#ifdef _WIN32
+      check(api->CreateSession(env,wide(tailPath).c_str(),tailOptions,&tailSession));
+#else
+      check(api->CreateSession(env,tailPath.c_str(),tailOptions,&tailSession));
+#endif
+      size_t ins=0;
+      check(api->SessionGetInputCount(tailSession,&ins));
+      for(size_t i=0;i<ins;i++){
+        char*t=nullptr;check(api->SessionGetInputName(tailSession,i,allocator,&t));tailInputs.push_back(t);check(api->AllocatorFree(allocator,t));
+      }
+      char*o=nullptr;check(api->SessionGetOutputName(tailSession,0,allocator,&o));outputName=o;check(api->AllocatorFree(allocator,o));
+    }
   }
+  bool split()const{return tailSession!=nullptr;}
+  /** What the head hands the tail for one section (owned; give it to tail()). */
+  struct Handoff{std::vector<OrtValue*> values;std::vector<float> input;double headSeconds=0;};
+  Handoff head(const std::vector<float>&stereo){
+    Handoff h;
+    h.input=stereo;
+    const int64_t shape[]{1,2,int64_t(SEGMENT)};
+    OrtValue*input=nullptr;
+    check(api->CreateTensorWithDataAsOrtValue(memory,h.input.data(),h.input.size()*sizeof(float),shape,3,ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,&input));
+    std::vector<const char*> names;for(auto&n:headOutputs)names.push_back(n.c_str());
+    h.values.assign(names.size(),nullptr);
+    const char*in=inputName.c_str();
+    const OrtValue*inputs[]{input};
+    const auto t=std::chrono::steady_clock::now();
+    OrtStatus*status=api->Run(session,nullptr,&in,inputs,1,names.data(),names.size(),h.values.data());
+    h.headSeconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-t).count();
+    api->ReleaseValue(input);
+    if(status){for(auto*v:h.values)if(v)api->ReleaseValue(v);check(status);}
+    return h;
+  }
+  /** Runs the tail on what head() returned; returns the six stems (planar stereo), and frees the hand-off. */
+  std::vector<float> tail(Handoff&h,double*seconds=nullptr){
+    const int64_t shape[]{1,2,int64_t(SEGMENT)};
+    OrtValue*input=nullptr;
+    check(api->CreateTensorWithDataAsOrtValue(memory,h.input.data(),h.input.size()*sizeof(float),shape,3,ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,&input));
+    std::vector<const char*> names;std::vector<const OrtValue*> values;
+    for(auto&n:tailInputs){
+      names.push_back(n.c_str());
+      if(n==inputName){values.push_back(input);continue;}
+      const OrtValue*found=nullptr;
+      for(size_t i=0;i<headOutputs.size();i++)if(headOutputs[i]==n)found=h.values[i];
+      if(!found){api->ReleaseValue(input);throw std::runtime_error("The split model's halves do not fit together ("+n+")");}
+      values.push_back(found);
+    }
+    OrtValue*out=nullptr;
+    const char*o=outputName.c_str();
+    const auto t=std::chrono::steady_clock::now();
+    OrtStatus*status=api->Run(tailSession,nullptr,names.data(),values.data(),values.size(),&o,1,&out);
+    if(seconds)*seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-t).count();
+    api->ReleaseValue(input);
+    for(auto*v:h.values)if(v)api->ReleaseValue(v);
+    h.values.clear();
+    check(status);
+    float*data=nullptr;
+    OrtTensorTypeAndShapeInfo*info=nullptr;size_t count=0;
+    check(api->GetTensorTypeAndShape(out,&info));
+    OrtStatus*sized=api->GetTensorShapeElementCount(info,&count);
+    api->ReleaseTensorTypeAndShapeInfo(info);
+    if(sized){api->ReleaseValue(out);check(sized);}
+    if(count!=SEGMENT*2*STEMS){api->ReleaseValue(out);throw std::runtime_error("This is not the six-stem model");}
+    check(api->GetTensorMutableData(out,reinterpret_cast<void**>(&data)));
+    std::vector<float> r(data,data+count);
+    api->ReleaseValue(out);
+    return r;
+  }
+  void release(Handoff&h){for(auto*v:h.values)if(v)api->ReleaseValue(v);h.values.clear();}
   ~Model(){
     if(profiling)endProfiling();
+    if(tailSession)api->ReleaseSession(tailSession);
+    if(tailOptions)api->ReleaseSessionOptions(tailOptions);
     if(memory)api->ReleaseMemoryInfo(memory);
     if(session)api->ReleaseSession(session);
     if(options)api->ReleaseSessionOptions(options);
@@ -316,6 +400,13 @@ public:
   Model&operator=(const Model&)=delete;
   // Takes planar stereo, returns six planar stereo stems. The result stays valid until the next run.
   const float*run(std::vector<float>&stereo){
+    if(split()){
+      Handoff h=head(stereo);
+      double tailSeconds=0;
+      splitOut=tail(h,&tailSeconds);
+      lastHead=h.headSeconds;lastTail=tailSeconds;
+      return splitOut.data();
+    }
     if(output){api->ReleaseValue(output);output=nullptr;}
     const int64_t shape[]{1,2,int64_t(SEGMENT)};
     OrtValue*input=nullptr;
@@ -352,8 +443,13 @@ public:
     if(OrtStatus*f=api->AllocatorFree(allocator,path))api->ReleaseStatus(f);
     return p;
   }
+  double lastHead=0,lastTail=0;   // the split model's last section: card part, processor part (s)
 private:
   bool profiling=false;
+  OrtSession*tailSession=nullptr;
+  OrtSessionOptions*tailOptions=nullptr;
+  std::vector<std::string> headOutputs,tailInputs;
+  std::vector<float> splitOut;
   void check(OrtStatus*status){
     if(!status)return;
     const std::string message=api->GetErrorMessage(status);
@@ -429,6 +525,7 @@ double since(Clock::time_point t){return std::chrono::duration<double>(Clock::no
 
 struct Timing{
   double load=0,downsample=0,sections=0,infer=0,inferGpu=0,inferCpu=0,assemble=0,upsample=0,tail=0,write=0,total=0;
+  double splitHead=0,splitTail=0;   // the split model: time in the card's part and the processor's part
   int gpuSections=0,cpuSections=0;
 } timing;
 
@@ -658,6 +755,7 @@ std::array<std::string,STEMS+1> extract(const std::string&modelPath,const std::s
       const auto inferBegan=Clock::now();
       const float*out=model.run(in);
       timing.infer+=since(inferBegan);
+      if(model.split()){timing.splitHead+=model.lastHead;timing.splitTail+=model.lastTail;}
       timing.gpuSections++;   // the first (only) session
       for(int s=0;s<STEMS;s++){
         if(FROM_MODEL[s]<0)continue;
@@ -923,6 +1021,8 @@ std::array<std::string,STEMS+1> extractPipelined(const std::string&modelPath,con
   int front=0,back=count-1,gpuHeld=0,cpuHeld=0;
   double gpuAvg=0,cpuAvg=0;
   bool failed=false;std::exception_ptr error;
+  std::deque<std::pair<int,Model::Handoff>> handoffs;   // heads done on the card, waiting for their tail
+  bool tailLane=false;
   auto fail=[&](std::exception_ptr e){std::lock_guard<std::mutex> g(qm);if(!error)error=e;failed=true;qcv.notify_all();};
   auto prepare=[&](int idx,std::vector<float>&in){
     const size_t from=size_t(idx)*STRIDE;
@@ -944,7 +1044,7 @@ std::array<std::string,STEMS+1> extractPipelined(const std::string&modelPath,con
             if(failed||cancelled.load())return;
             if(front>back)return;
             if(!fromBack){
-              if(gpuHeld<3){idx=front++;break;}           // triple buffering
+              if(gpuHeld+int(handoffs.size())<3){idx=front++;break;}           // triple buffering
             }else{
               // Take the last section only if the card won't reach it first, and hold at most four.
               const int left=back-front+1;
@@ -956,8 +1056,29 @@ std::array<std::string,STEMS+1> extractPipelined(const std::string&modelPath,con
         }
         prepare(idx,in);
         const auto t=Clock::now();
-        const float*out=model->run(in);
-        std::vector<float> copy(out,out+SEGMENT*2*STEMS);
+        std::vector<float> copy;
+        if(model->split()&&!fromBack&&tailLane){
+          // The card runs this section's head while the processor runs the previous section's tail.
+          Model::Handoff h=model->head(in);
+          {
+            std::unique_lock<std::mutex> l(qm);
+            while(handoffs.size()>=2&&!failed)qcv.wait_for(l,std::chrono::milliseconds(50));
+            if(failed){model->release(h);return;}
+            timing.splitHead+=h.headSeconds;
+            handoffs.emplace_back(idx,std::move(h));
+          }
+          qcv.notify_all();
+          continue;
+        }
+        if(model->split()){
+          const float*out=model->run(in);
+          copy.assign(out,out+SEGMENT*2*STEMS);
+          std::lock_guard<std::mutex> g(qm);
+          timing.splitHead+=model->lastHead;timing.splitTail+=model->lastTail;
+        }else{
+          const float*out=model->run(in);
+          copy.assign(out,out+SEGMENT*2*STEMS);
+        }
         const double took=since(t);
         {
           std::lock_guard<std::mutex> g(qm);
@@ -975,7 +1096,34 @@ std::array<std::string,STEMS+1> extractPipelined(const std::string&modelPath,con
   std::unique_ptr<Model> second;
   if(plan.parallel)second.reset(new Model(modelPath,plan.cpuThreads,0));
   std::vector<std::thread> workers;
-  workers.emplace_back(worker,first.get(),false);
+  tailLane=first->split()&&plan.primary!=0;
+  bool headsDone=false;
+  workers.emplace_back([&]{worker(first.get(),false);std::lock_guard<std::mutex> g(qm);headsDone=true;qcv.notify_all();});
+  if(tailLane)workers.emplace_back([&]{
+    // The processor's lane: tails of sections whose head the card has finished, in the order they come.
+    try{
+      for(;;){
+        std::pair<int,Model::Handoff> job;
+        {
+          std::unique_lock<std::mutex> l(qm);
+          while(handoffs.empty()&&!failed&&!(headsDone))qcv.wait_for(l,std::chrono::milliseconds(50));
+          if(failed){for(auto&h:handoffs)first->release(h.second);handoffs.clear();return;}
+          if(handoffs.empty())return;
+          job=std::move(handoffs.front());handoffs.pop_front();
+        }
+        qcv.notify_all();
+        double tailSeconds=0;
+        std::vector<float> out=first->tail(job.second,&tailSeconds);
+        {
+          std::lock_guard<std::mutex> g(qm);
+          timing.splitTail+=tailSeconds;
+          gpuHeld++;timing.gpuSections++;timing.inferGpu+=job.second.headSeconds+tailSeconds;gpuAvg=timing.inferGpu/timing.gpuSections;
+          finished[job.first]=std::make_pair(std::move(out),false);
+        }
+        qcv.notify_all();
+      }
+    }catch(...){fail(std::current_exception());}
+  });
   if(second)workers.emplace_back(worker,second.get(),true);
   struct Joiner{std::vector<std::thread>&w;~Joiner(){for(auto&t:w)if(t.joinable())t.join();}}joiner{workers};
 
@@ -1196,9 +1344,11 @@ int run(int argc,char**argv){
   // --gpu-way auto | fused | unfused | adapter; --monitor; --profile PREFIX; --cpu-threads N; --helpers N.
   const std::string mode=arg(argc,argv,"--mode","serial"),gpuWay=arg(argc,argv,"--gpu-way","auto");
   profilePrefix=arg(argc,argv,"--profile","");
+  tailPath=arg(argc,argv,"--tail","");
   bool monitorOn=false;
   for(int i=1;i<argc;i++)monitorOn|=strcmp(argv[i],"--monitor")==0;
   const int cores=int(std::max(1u,std::thread::hardware_concurrency()));
+  tailThreads=std::max(1,atoi(arg(argc,argv,"--tail-threads",std::to_string(std::max(1,cores-2)).c_str())));
   const int threads=atoi(arg(argc,argv,"--threads",std::to_string(std::max(1,std::min(cores-1,16))).c_str()));
   bool probe=false;
   for(int i=1;i<argc;i++)probe|=strcmp(argv[i],"--probe")==0;
@@ -1255,9 +1405,9 @@ int run(int argc,char**argv){
       }catch(...){monitor.stop();throw;}
       const Monitor::Stats st=monitor.stop();
       for(int s=0;s<STEMS;s++)say("STEM %s %s\n",NAMES[s],results[s].c_str());
-      say("TIMING mode=%s device=%s load=%.2f downsample=%.2f sections=%.2f infer=%.2f infer_first=%.2f infer_second=%.2f first_sections=%d second_sections=%d assemble=%.2f upsample=%.2f write=%.2f total=%.2f\n",
+      say("TIMING mode=%s device=%s load=%.2f downsample=%.2f sections=%.2f infer=%.2f infer_first=%.2f infer_second=%.2f first_sections=%d second_sections=%d assemble=%.2f upsample=%.2f write=%.2f total=%.2f split_head=%.2f split_tail=%.2f\n",
         mode.c_str(),gpu==0?"cpu":gpu==2?"gpu-fused":gpu==3?"gpu-unfused":"gpu-adapter",timing.load,timing.downsample,timing.sections,timing.infer,timing.inferGpu,timing.inferCpu,
-        timing.gpuSections,timing.cpuSections,timing.assemble,timing.upsample,timing.write,timing.total);
+        timing.gpuSections,timing.cpuSections,timing.assemble,timing.upsample,timing.write,timing.total,timing.splitHead,timing.splitTail);
       say("STATS cpu_avg=%.0f cpu_max=%.0f proc_cpu_avg=%.0f gpu_avg=%.0f gpu_max=%.0f vram_peak=%ld shared_peak=%ld gpu_used_peak=%ld ram_peak=%ld temp_start=%ld temp_max=%ld power_max=%ld samples=%d\n",
         st.cpuAvg,st.cpuMax,st.procCpuAvg,st.gpuAvg,st.gpuMax,st.vramPeak,st.sharedPeak,st.gpuUsedPeak,st.ramPeak,st.tempStart,st.tempMax,st.powerMax,st.samples);
       say("DONE %s\n",results[STEMS].c_str());
