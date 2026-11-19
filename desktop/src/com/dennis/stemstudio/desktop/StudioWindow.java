@@ -32,6 +32,7 @@ class StudioWindow {
     final Ui.Segmented device = new Ui.Segmented("Graphics card", "Processor");
     final Ui.Words deviceNote = new Ui.Words("", Theme.body(12.5f), Theme.DIM, 2);
     final Ui.Btn separate = new Ui.Btn("Separate into six stems", Ui.Kind.PRIMARY);
+    final Ui.Btn benchmark = new Ui.Btn("Benchmark this song (experimental)", Ui.Kind.GHOST);
     final Bar bar = new Bar();
     final Ui.Words progressText = new Ui.Words("", Theme.body(13f), Theme.MID, 4);
     // Use card.
@@ -63,6 +64,8 @@ class StudioWindow {
         separateCard.add(progressText);
         separateCard.add(Ui.gap(4));
         separateCard.add(separate);
+        separateCard.add(Ui.gap(4));
+        separateCard.add(benchmark);
 
         useCard.add(toMasterRoom);
         useCard.add(Ui.gap(6));
@@ -71,7 +74,9 @@ class StudioWindow {
         useCard.add(savedWhere);
         useCard.add(openFolder);
 
-        for (JComponent c : new JComponent[]{drop, songName, songWhere, chooseAnother, device, deviceNote, separate, bar, progressText, toMasterRoom, saveWavs, savedWhere, openFolder}) {
+        benchmark.setVisible(false);
+        benchmark.setPreferredSize(new Dimension(160, 34));
+        for (JComponent c : new JComponent[]{benchmark, drop, songName, songWhere, chooseAnother, device, deviceNote, separate, bar, progressText, toMasterRoom, saveWavs, savedWhere, openFolder}) {
             c.setAlignmentX(Component.LEFT_ALIGNMENT);
             Dimension p = c.getPreferredSize();
             c.setMaximumSize(new Dimension(Integer.MAX_VALUE, p.height));

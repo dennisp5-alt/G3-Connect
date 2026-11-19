@@ -93,6 +93,8 @@ final class Engine {
         if (!out.isDirectory() && !out.mkdirs()) throw new IOException("Could not create " + out);
         List<String> cmd = new ArrayList<>(List.of(exe().getAbsolutePath(), "--model", model().getAbsolutePath(), "--in", wav.getAbsolutePath(),
             "--out", out.getAbsolutePath(), "--prefix", prefix, "--device", gpu ? "auto" : "cpu", "--peaks", String.valueOf(columns), "--watch-stdin"));
+        // The experimental build separates the pipelined way (same files; see Benchmark); the release stays serial.
+        if (System.getProperty("stemstudio.experimental") != null) cmd.addAll(List.of("--mode", "pipelined"));
         Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
         running = p;
         File[] stems = new File[6];

@@ -23,6 +23,9 @@ final class Studio {
     private StemPlayer player;
     private File engineInput, tempWav;
     private Thread job;
+    private Engine.Probe probe = new Engine.Probe(null, 0, Runtime.getRuntime().availableProcessors());
+    private volatile boolean benchmarking;
+    static final boolean EXPERIMENTAL = System.getProperty("stemstudio.experimental") != null;
 
     Studio(StudioWindow w, JFrame frame) {
         this.w = w;
@@ -32,7 +35,9 @@ final class Studio {
         s.engineReady = Engine.ready();
         w.drop.onClick(e -> choose());
         w.chooseAnother.onClick(e -> choose());
-        w.separate.onClick(e -> { if (s.stage == Session.Stage.SEPARATING) stop(); else separate(); });
+        w.separate.onClick(e -> { if (benchmarking) Benchmark.stop(); else if (s.stage == Session.Stage.SEPARATING) stop(); else separate(); });
+        w.benchmark.setVisible(EXPERIMENTAL);
+        w.benchmark.onClick(e -> benchmark());
         w.device.onChange(i -> { PREFS.putInt("device", i); estimate(); w.refresh(); });
         w.toMasterRoom.onClick(e -> sendToMasterRoom());
         w.saveWavs.onClick(e -> saveCopy());
@@ -70,6 +75,7 @@ final class Studio {
         // Which graphics card there is (a moment's work, off the window's thread).
         new Thread(() -> {
             Engine.Probe p = Engine.probe();
+            probe = p;
             SwingUtilities.invokeLater(() -> {
                 s.onGpu = p.hasGpu();
                 s.device = p.hasGpu() ? p.gpu() : "";
@@ -247,6 +253,48 @@ final class Studio {
             ui(() -> { estimate(); w.refresh(); });
         }, "separate");
         job.start();
+    }
+
+    /** Experimental: every way of running the engine on 60 s of this song, measured and checked. */
+    private void benchmark() {
+        if (engineInput == null || benchmarking || s.stage == Session.Stage.SEPARATING) return;
+        closePlayer();
+        benchmarking = true;
+        s.result = "Benchmark starting. It runs the same 60 seconds about seven ways and takes several minutes.";
+        s.resultBad = false;
+        w.separate.set("Stop the benchmark", Ui.Kind.DANGER);
+        w.benchmark.setEnabled(false);
+        w.refresh();
+        w.separate.set("Stop the benchmark", Ui.Kind.DANGER);
+        final File input = engineInput;
+        final int start = s.seconds >= 100 ? 30 : 0;
+        new Thread(() -> {
+            String done;
+            File report = null;
+            try {
+                report = Benchmark.run(input, s.title, start, probe, msg -> ui(() -> { s.result = msg; w.refresh(); w.separate.set("Stop the benchmark", Ui.Kind.DANGER); }));
+                done = "Benchmark finished. The report is in " + StudioWindow.shortPath(report.getParent()) + ".";
+            } catch (Exception e) {
+                done = "The benchmark did not finish: " + message(e);
+            }
+            final String text = done;
+            final File shown = report;
+            ui(() -> {
+                benchmarking = false;
+                s.result = text;
+                w.benchmark.setEnabled(true);
+                w.refresh();
+                if (shown != null) {
+                    try {
+                        JTextArea t = new JTextArea(java.nio.file.Files.readString(shown.toPath()), 30, 130);
+                        t.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+                        t.setEditable(false);
+                        JOptionPane.showMessageDialog(frame, new JScrollPane(t), "Stem Studio benchmark", JOptionPane.PLAIN_MESSAGE);
+                    } catch (IOException ignored) { }
+                    Places.reveal(shown);
+                }
+            });
+        }, "benchmark").start();
     }
 
     private void stop() {

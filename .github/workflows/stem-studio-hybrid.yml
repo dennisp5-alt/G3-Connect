@@ -1,0 +1,141 @@
+name: Stem Studio hybrid experiment
+
+# Experimental: the pipelined and parallel engine modes and the in-app benchmark. Builds a portable
+# "Stem Studio Experimental" (its own settings, beside the installed release, which it never replaces),
+# measures the processor's ways on Windows, and checks every mode writes the same files as the serial one.
+on:
+  workflow_dispatch:
+  push:
+    branches: ['experiment/hybrid-processing']
+    paths:
+      - 'desktop/**'
+      - '.github/workflows/stem-studio-hybrid.yml'
+
+permissions:
+  contents: write  # the experimental download is a GitHub pre-release
+
+env:
+  APP_VERSION: '0.2.0'
+  MODEL_URL: 'https://huggingface.co/StemSplitio/htdemucs-6s-onnx/resolve/main/htdemucs_6s_fp16weights.onnx'
+  FFMPEG_REPO: 'BtbN/FFmpeg-Builds'
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: ONNX Runtime with DirectML, and DirectML
+        run: |
+          latest() { curl -fsSL "https://api.nuget.org/v3-flatcontainer/$1/index.json" | python -c "import sys,json; v=[x for x in json.load(sys.stdin)['versions'] if '-' not in x]; print(v[-1])"; }
+          ORT=$(latest microsoft.ml.onnxruntime.directml); DML=$(latest microsoft.ai.directml)
+          echo "ONNX Runtime DirectML $ORT, DirectML $DML" | tee runtime-versions.txt
+          curl -fsSL -o ort.zip "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/$ORT/microsoft.ml.onnxruntime.directml.$ORT.nupkg"
+          curl -fsSL -o dml.zip "https://api.nuget.org/v3-flatcontainer/microsoft.ai.directml/$DML/microsoft.ai.directml.$DML.nupkg"
+          mkdir -p ort dml build/app/engine
+          7z x -y -oort ort.zip > /dev/null
+          7z x -y -odml dml.zip > /dev/null
+          cp ort/runtimes/win-x64/native/onnxruntime.dll dml/bin/x64-win/DirectML.dll build/app/engine/
+          cp "$(ls ort/LICENSE* | head -1)" build/app/engine/LICENSE-onnxruntime.txt
+          cp "$(ls dml/LICENSE* | head -1)" build/app/engine/LICENSE-DirectML.txt
+
+      - name: Compile the engine
+        shell: cmd
+        run: |
+          cl /nologo /O2 /EHsc /std:c++17 /utf-8 /W3 /DSTEM_DIRECTML /Iort\build\native\include desktop\engine\stem_engine.cpp /Fe:build\app\engine\stemengine.exe /link /LIBPATH:ort\runtimes\win-x64\native onnxruntime.lib psapi.lib dxgi.lib
+          if errorlevel 1 exit /b 1
+          del stem_engine.obj 2>nul
+          build\app\engine\stemengine.exe --probe
+
+      - name: Compile the app and its checks
+        run: |
+          mkdir -p build/classes/fonts build/check
+          javac -nowarn -encoding UTF-8 --release 21 -d build/classes $(find desktop/src -name '*.java')
+          cp desktop/fonts/*.otf build/classes/fonts/
+          javac -nowarn -encoding UTF-8 --release 21 -cp build/classes -d build/check $(find desktop/check -name '*.java')
+
+      - name: Model and FFmpeg
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p build/app/models build/app/ffmpeg ffx
+          curl -fLsS --retry 3 "$MODEL_URL" -o build/app/models/htdemucs_6s.onnx
+          NAME=$(gh release view latest -R "$FFMPEG_REPO" --json assets --jq '.assets[].name' | grep -E '^ffmpeg-n[0-9.]+-latest-win64-lgpl-[0-9.]+\.zip$' | sort -V | tail -1)
+          gh release download latest -R "$FFMPEG_REPO" -p "$NAME" -O ffmpeg.zip
+          7z x -y -offx ffmpeg.zip > /dev/null
+          cp ffx/*/bin/ffmpeg.exe build/app/ffmpeg/
+          cp ffx/*/LICENSE.txt build/app/ffmpeg/LICENSE-FFmpeg-LGPL.txt
+
+      - name: Test song (synthetic, 70 seconds, 48 kHz)
+        run: |
+          pip install --disable-pip-version-check -q numpy scipy
+          python experiments/four-stem/bench/make_song.py song.wav 70
+
+      - name: Engine modes on the processor (60 s, real model) and byte-for-byte comparison
+        run: |
+          E=build/app/engine/stemengine.exe; M=build/app/models/htdemucs_6s.onnx
+          echo "Processor: $NUMBER_OF_PROCESSORS threads" | tee modes.txt
+          for m in serial pipelined parallel; do
+            mkdir -p "out-$m"
+            $E --model $M --in song.wav --out "out-$m" --prefix m --device cpu --mode $m --seconds 60 --monitor | grep -E '^(TIMING|STATS|ERROR|DONE|FALLBACK)' | tee -a modes.txt
+          done
+          for m in pipelined parallel; do for f in out-serial/*.wav; do
+            if cmp -s "$f" "out-$m/$(basename "$f")"; then echo "same $m $(basename "$f")"; else echo "DIFF $m $(basename "$f")"; fi
+          done; done | tee -a modes.txt
+          ! grep -q '^DIFF' modes.txt
+          python experiments/six-stem/check_sum.py song.wav out-pipelined m | tee -a modes.txt
+
+      - name: The app's benchmark, as the button runs it
+        run: |
+          set -o pipefail
+          E="-Dstemstudio.engine=build/app/engine/stemengine.exe -Dstemstudio.model=build/app/models/htdemucs_6s.onnx -Dstemstudio.out=bench-out"
+          java $E -cp "build/classes;build/check" com.dennis.stemstudio.desktop.BenchmarkCheck song.wav | tee benchmark.txt
+          grep -q BENCHMARK_CHECK_PASS benchmark.txt
+
+      - name: Package (portable "Stem Studio Experimental", own settings)
+        run: |
+          cp desktop/WINDOWS_NOTICES.txt desktop/fonts/OFL-Inter.txt build/app/
+          jar --create --file build/app/stemstudio.jar --main-class com.dennis.stemstudio.desktop.Main -C build/classes .
+          java -cp build/classes com.dennis.stemstudio.desktop.AppIcon build/StemStudio.ico
+          jpackage --type app-image --name "Stem Studio Experimental" --dest build/dist \
+            --input build/app --main-jar stemstudio.jar --main-class com.dennis.stemstudio.desktop.Main \
+            --app-version "$APP_VERSION" --vendor "Dennis" --description "Stem Studio experimental: hybrid processing benchmark" \
+            --java-options "-Xmx2g" --java-options "-Dfile.encoding=UTF-8" --java-options "-Dstemstudio.experimental=1" \
+            --java-options "-Dstemstudio.prefs=/com/dennis/stemstudio/experimental" --icon build/StemStudio.ico
+          cd build/dist && 7z a -tzip "../../StemStudio-Experimental-$APP_VERSION.zip" "Stem Studio Experimental" > /dev/null
+          cd - > /dev/null; ls -la StemStudio-Experimental-*.zip
+
+      - name: Experimental download (a GitHub pre-release; never the normal release)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="stem-studio-windows-experimental"
+          NOTES="Stem Studio Experimental $APP_VERSION: pipelined and parallel processing, and a Benchmark button. Portable: unzip anywhere and run Stem Studio Experimental.exe. It keeps its own settings and does not replace the installed Stem Studio. Built from ${GITHUB_SHA::7} on $GITHUB_REF_NAME."
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" StemStudio-Experimental-*.zip --clobber
+            gh release edit "$TAG" --notes "$NOTES" --prerelease
+          else
+            gh release create "$TAG" StemStudio-Experimental-*.zip --prerelease --target "$GITHUB_SHA" --title "Stem Studio Experimental (hybrid processing)" --notes "$NOTES"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: StemStudio-hybrid-results
+          path: |
+            modes.txt
+            benchmark.txt
+            runtime-versions.txt
+          retention-days: 30

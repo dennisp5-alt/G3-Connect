@@ -9,6 +9,10 @@
 // Prints: DEVICE ..., SECTIONS n, SECTION i n, STAGE name i n, STEM name path, DONE summary | ERROR message
 #include <thread>
 #include <iostream>
+#include <condition_variable>
+#include <map>
+#include <mutex>
+#include <functional>
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
@@ -25,6 +29,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -199,17 +204,22 @@ public:
   }
   std::vector<float> run(const std::vector<float>&in,size_t frames)const{
     std::vector<float> out(frames);
-    const int64_t n=int64_t(in.size());
-    for(size_t i=0;i<frames;i++){
+    runRange(in.data(),int64_t(in.size()),0,frames,out.data());
+    return out;
+  }
+  /** Output samples [from, to) of the whole conversion of in[0..n), exactly as run() computes them;
+      out points at the place for sample `from`. */
+  void runRange(const float*in,int64_t n,size_t from,size_t to,float*out)const{
+    for(size_t i=from;i<to;i++){
       if((i&65535)==0)checkCancel();
       const uint64_t place=uint64_t(i)*down_;
       const int64_t first=int64_t(place/up_)-31;
       const float*w=&table_[size_t(place%up_)*TAPS];
       if(first>=0&&first+TAPS<=n){
-        const float*x=in.data()+first;
+        const float*x=in+first;
         float value=0;
         for(int t=0;t<TAPS;t++)value+=w[t]*x[t];
-        out[i]=value;
+        out[i-from]=value;
       }else{
         double value=0,weight=0;
         for(int t=0;t<TAPS;t++){
@@ -218,11 +228,13 @@ public:
           value+=w[t]*in[size_t(at)];
           weight+=w[t];
         }
-        out[i]=std::abs(weight)<1e-8?0.f:float(value/weight);
+        out[i-from]=std::abs(weight)<1e-8?0.f:float(value/weight);
       }
     }
-    return out;
   }
+  /** The input sample an output's filter starts at (it reads 64 from there). */
+  int64_t firstInput(size_t i)const{return int64_t(uint64_t(i)*down_/up_)-31;}
+  static constexpr int taps(){return TAPS;}
 private:
   static constexpr int TAPS=64;
   int up_,down_;
@@ -232,12 +244,15 @@ private:
 // One loaded model. The memory arena and pattern stay off, for the reason found in the four-stem
 // build: left on, the runtime holds on to all its working memory and adds more.
 std::string deviceName;
+std::string profilePrefix;   // --profile: ONNX Runtime writes a per-node timing file (which device ran each step)
 
 class Model {
 public:
-  // gpu: 0 the processor; 2 DirectML on the high-performance card, fully optimised; 1 DirectML on that card
-  // by its adapter number, basic optimisation (a second way in when the first fails). The processor runs
-  // any part the card cannot.
+  // gpu: 0 the processor; 2 DirectML on the high-performance card, fully optimised; 3 the same card with
+  // DirectML's graph fusion off (each step runs on its own and working memory is reused between steps,
+  // instead of the whole model as one job that reserves all of it at once: the way to fit a 4 GB card);
+  // 1 DirectML on that card by its adapter number, basic optimisation. The processor runs any part the
+  // card cannot.
   Model(const std::string&path,int threads,int gpu):api(OrtGetApiBase()->GetApi(ORT_API_VERSION)){
     const bool useGpu=gpu>0;
     if(!api)throw std::runtime_error("The AI runtime is the wrong version");
@@ -250,13 +265,22 @@ public:
     check(api->DisableMemPattern(options));
     // On the phone any graph optimization made loading peak at 6.1 GB. A computer has room for the
     // basic level (about 30% faster per section on the processor); the full level is no faster here.
-    check(api->SetSessionGraphOptimizationLevel(options,gpu==2?ORT_ENABLE_ALL:ORT_ENABLE_BASIC));
+    check(api->SetSessionGraphOptimizationLevel(options,gpu==2||gpu==3?ORT_ENABLE_ALL:ORT_ENABLE_BASIC));
+    if(gpu==3)check(api->AddSessionConfigEntry(options,"ep.dml.disable_graph_fusion","1"));
+    if(!profilePrefix.empty()){
+#ifdef _WIN32
+      check(api->EnableProfiling(options,wide(profilePrefix).c_str()));
+#else
+      check(api->EnableProfiling(options,profilePrefix.c_str()));
+#endif
+      profiling=true;
+    }
 #ifdef STEM_DIRECTML
     if(useGpu){
       // The fastest card (on a laptop, the separate graphics card rather than the one in the processor).
       const OrtDmlApi*dml=nullptr;
       check(api->GetExecutionProviderApi("DML",ORT_API_VERSION,reinterpret_cast<const void**>(&dml)));
-      if(gpu==2){
+      if(gpu==2||gpu==3){
         OrtDmlDeviceOptions choice{};
         choice.Preference=OrtDmlPerformancePreference::HighPerformance;
         choice.Filter=OrtDmlDeviceFilter::Gpu;
@@ -282,6 +306,7 @@ public:
     check(api->AllocatorFree(allocator,out));
   }
   ~Model(){
+    if(profiling)endProfiling();
     if(memory)api->ReleaseMemoryInfo(memory);
     if(session)api->ReleaseSession(session);
     if(options)api->ReleaseSessionOptions(options);
@@ -313,7 +338,22 @@ public:
     return data;
   }
   void finish(){if(output){api->ReleaseValue(output);output=nullptr;}}
+  /** Ends profiling and returns the file ONNX Runtime wrote, or "". */
+  std::string endProfiling(){
+    if(!profiling)return "";
+    profiling=false;
+    OrtAllocator*allocator=nullptr;
+    char*path=nullptr;
+    OrtStatus*st=api->GetAllocatorWithDefaultOptions(&allocator);
+    if(!st)st=api->SessionEndProfiling(session,allocator,&path);
+    if(st){api->ReleaseStatus(st);return "";}
+    if(!path)return "";
+    std::string p(path);
+    if(OrtStatus*f=api->AllocatorFree(allocator,path))api->ReleaseStatus(f);
+    return p;
+  }
 private:
+  bool profiling=false;
   void check(OrtStatus*status){
     if(!status)return;
     const std::string message=api->GetErrorMessage(status);
@@ -381,11 +421,164 @@ void readAll(const std::string&path,float*left,float*right,size_t n){
     throw std::runtime_error("Temporary stem is incomplete");
 }
 
+// ---------------------------------------------------------------------------------------------------
+// Measuring: where the time goes, and what the processor, graphics card and memory are doing.
+// ---------------------------------------------------------------------------------------------------
+using Clock=std::chrono::steady_clock;
+double since(Clock::time_point t){return std::chrono::duration<double>(Clock::now()-t).count();}
+
+struct Timing{
+  double load=0,downsample=0,sections=0,infer=0,inferGpu=0,inferCpu=0,assemble=0,upsample=0,tail=0,write=0,total=0;
+  int gpuSections=0,cpuSections=0;
+} timing;
+
+std::mutex outLock;   // lines on standard output come from several threads
+void say(const char*fmt,...){
+  std::lock_guard<std::mutex> g(outLock);
+  va_list a;va_start(a,fmt);vprintf(fmt,a);va_end(a);fflush(stdout);
+}
+
+class Monitor{
+public:
+  struct Stats{double cpuAvg=0,cpuMax=0,procCpuAvg=0,gpuAvg=0,gpuMax=0;long vramPeak=-1,sharedPeak=-1,gpuUsedPeak=-1,ramPeak=0,tempStart=-1,tempMax=-1,powerMax=-1;int samples=0,gpuSamples=0;};
+  void start(bool print){
+    printing=print;stats=Stats();running=true;began=Clock::now();
+    openGpu();
+    sampleCpu(nullptr,nullptr);
+    worker=std::thread([this]{
+      while(running){
+        std::unique_lock<std::mutex> l(m);
+        cv.wait_for(l,std::chrono::milliseconds(250),[this]{return !running.load();});
+        if(!running)break;
+        l.unlock();
+        sample();
+      }
+    });
+  }
+  Stats stop(){
+    if(running){running=false;cv.notify_all();if(worker.joinable())worker.join();}
+    sample();
+    Stats s=stats;
+    if(s.samples){s.cpuAvg/=s.samples;s.procCpuAvg/=s.samples;}
+    if(s.gpuSamples)s.gpuAvg/=s.gpuSamples;else s.gpuAvg=s.gpuMax=-1;
+    return s;
+  }
+private:
+  void sample(){
+    double cpu=0,proc=0;
+    sampleCpu(&cpu,&proc);
+    stats.samples++;stats.cpuAvg+=cpu;stats.procCpuAvg+=proc;stats.cpuMax=std::max(stats.cpuMax,cpu);
+    long ram=long(peakMegabytes());stats.ramPeak=std::max(stats.ramPeak,ram);
+    long gpu=-1,used=-1,temp=-1,power=-1,vram=-1,shared=-1;
+    readGpu(gpu,used,temp,power,vram,shared);
+    if(gpu>=0){stats.gpuSamples++;stats.gpuAvg+=gpu;stats.gpuMax=std::max(stats.gpuMax,double(gpu));}
+    if(used>=0)stats.gpuUsedPeak=std::max(stats.gpuUsedPeak,used);
+    if(temp>=0){if(stats.tempStart<0)stats.tempStart=temp;stats.tempMax=std::max(stats.tempMax,temp);}
+    if(power>=0)stats.powerMax=std::max(stats.powerMax,power);
+    if(vram>=0)stats.vramPeak=std::max(stats.vramPeak,vram);
+    if(shared>=0)stats.sharedPeak=std::max(stats.sharedPeak,shared);
+    if(printing&&(++tick%4==0))
+      say("MON %.1f cpu=%.0f proc=%.0f ram=%ld gpu=%ld gpuused=%ld vram=%ld shared=%ld temp=%ld power=%ld\n",since(began),cpu,proc,ram,gpu,used,vram,shared,temp,power);
+  }
+#ifdef _WIN32
+  static uint64_t ft(const FILETIME&f){return (uint64_t(f.dwHighDateTime)<<32)|f.dwLowDateTime;}
+  void sampleCpu(double*cpu,double*proc){
+    FILETIME idle,kernel,user,c,e,pk,pu;
+    if(!GetSystemTimes(&idle,&kernel,&user)||!GetProcessTimes(GetCurrentProcess(),&c,&e,&pk,&pu))return;
+    const uint64_t i=ft(idle),k=ft(kernel),u=ft(user),p=ft(pk)+ft(pu);
+    if(cpu&&k+u>lastK+lastU){
+      const double all=double((k-lastK)+(u-lastU));
+      *cpu=100.0*(all-double(i-lastI))/all;
+      *proc=100.0*double(p-lastP)/all;
+    }
+    lastI=i;lastK=k;lastU=u;lastP=p;
+  }
+  // The graphics card, through NVIDIA's own management library (in Windows with the driver) and DirectX.
+  typedef int(*NvInit)();typedef int(*NvHandle)(unsigned,void**);
+  struct NvUtil{unsigned gpu,memory;};struct NvMem{unsigned long long total,free,used;};
+  typedef int(*NvGetUtil)(void*,NvUtil*);typedef int(*NvGetMem)(void*,NvMem*);typedef int(*NvGetTemp)(void*,int,unsigned*);typedef int(*NvGetPower)(void*,unsigned*);
+  HMODULE nvml=nullptr;void*nvDev=nullptr;NvGetUtil nvUtil=nullptr;NvGetMem nvMem=nullptr;NvGetTemp nvTemp=nullptr;NvGetPower nvPower=nullptr;
+#ifdef STEM_DIRECTML
+  IDXGIAdapter3*adapter=nullptr;
+#endif
+  void openGpu(){
+    if(!nvml){
+      nvml=LoadLibraryW(L"nvml.dll");
+      if(!nvml)nvml=LoadLibraryW(L"C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvml.dll");
+      if(nvml){
+        auto init=(NvInit)GetProcAddress(nvml,"nvmlInit_v2");auto handle=(NvHandle)GetProcAddress(nvml,"nvmlDeviceGetHandleByIndex_v2");
+        nvUtil=(NvGetUtil)GetProcAddress(nvml,"nvmlDeviceGetUtilizationRates");nvMem=(NvGetMem)GetProcAddress(nvml,"nvmlDeviceGetMemoryInfo");
+        nvTemp=(NvGetTemp)GetProcAddress(nvml,"nvmlDeviceGetTemperature");nvPower=(NvGetPower)GetProcAddress(nvml,"nvmlDeviceGetPowerUsage");
+        if(!init||!handle||init()!=0||handle(0,&nvDev)!=0)nvDev=nullptr;
+      }
+    }
+#ifdef STEM_DIRECTML
+    if(!adapter){
+      IDXGIFactory6*factory=nullptr;
+      if(SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory6),reinterpret_cast<void**>(&factory)))){
+        for(UINT i=0;;i++){
+          IDXGIAdapter3*a=nullptr;
+          if(FAILED(factory->EnumAdapterByGpuPreference(i,DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,__uuidof(IDXGIAdapter3),reinterpret_cast<void**>(&a))))break;
+          DXGI_ADAPTER_DESC1 d{};a->GetDesc1(&d);
+          if((d.Flags&DXGI_ADAPTER_FLAG_SOFTWARE)||d.VendorId==0x1414){a->Release();continue;}
+          adapter=a;break;
+        }
+        factory->Release();
+      }
+    }
+#endif
+  }
+  void readGpu(long&gpu,long&used,long&temp,long&power,long&vram,long&shared){
+    if(nvDev){
+      NvUtil u{};NvMem mem{};unsigned t=0,p=0;
+      if(nvUtil&&nvUtil(nvDev,&u)==0)gpu=long(u.gpu);
+      if(nvMem&&nvMem(nvDev,&mem)==0)used=long(mem.used/1048576);
+      if(nvTemp&&nvTemp(nvDev,0,&t)==0)temp=long(t);
+      if(nvPower&&nvPower(nvDev,&p)==0)power=long(p/1000);
+    }
+#ifdef STEM_DIRECTML
+    if(adapter){
+      DXGI_QUERY_VIDEO_MEMORY_INFO local{},nonLocal{};
+      if(SUCCEEDED(adapter->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_LOCAL,&local)))vram=long(local.CurrentUsage/1048576);
+      if(SUCCEEDED(adapter->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL,&nonLocal)))shared=long(nonLocal.CurrentUsage/1048576);
+    }
+#endif
+  }
+  uint64_t lastI=0,lastK=0,lastU=0,lastP=0;
+#else
+  void sampleCpu(double*cpu,double*proc){
+    FILE*f=fopen("/proc/stat","r");if(!f)return;
+    unsigned long long a[10]{};
+    if(fscanf(f,"cpu %llu %llu %llu %llu %llu %llu %llu %llu",&a[0],&a[1],&a[2],&a[3],&a[4],&a[5],&a[6],&a[7])!=8){fclose(f);return;}
+    fclose(f);
+    unsigned long long idle=a[3]+a[4],all=0;for(int i=0;i<8;i++)all+=a[i];
+    FILE*p=fopen("/proc/self/stat","r");unsigned long long ut=0,st=0;
+    if(p){char buf[1024];if(fgets(buf,sizeof buf,p)){const char*q=strrchr(buf,')');if(q)sscanf(q+2,"%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu",&ut,&st);}fclose(p);}
+    if(cpu&&all>lastAll){*cpu=100.0*double((all-lastAll)-(idle-lastIdle))/double(all-lastAll);*proc=100.0*double((ut+st)-lastProc)/double(all-lastAll);}
+    lastAll=all;lastIdle=idle;lastProc=ut+st;
+  }
+  void openGpu(){}
+  void readGpu(long&,long&,long&,long&,long&,long&){}
+  unsigned long long lastAll=0,lastIdle=0,lastProc=0;
+#endif
+  std::atomic<bool> running{false};
+  bool printing=false;int tick=0;
+  Clock::time_point began;
+  std::thread worker;
+  std::mutex m;std::condition_variable cv;
+  Stats stats;
+} monitor;
+
+
+void placement(const std::string&path);
+
 std::array<std::string,STEMS+1> extract(const std::string&modelPath,const std::string&wav,
   const std::string&folder,const std::string&prefix,int start,int duration,int threads,int useGpu){
   if(busy.exchange(true))throw std::runtime_error("Already separating");
   struct Guard{~Guard(){busy.store(false);cancelled.store(false);}}guard;
-  cancelled.store(false);
+  cancelled.store(stopAsked.load());   // a Stop that came before the run started still counts
+  timing=Timing();
+  const auto serialBegan=Clock::now();
   if(start<0||start>1200||(duration!=0&&duration!=10&&duration!=60))
     throw std::runtime_error("Unsupported preview duration/position");
   if(threads<1||threads>64)throw std::runtime_error("Unsupported thread count");
@@ -414,7 +607,9 @@ std::array<std::string,STEMS+1> extract(const std::string&modelPath,const std::s
   // The whole song at the model's rate. Only its statistics and one section are used at a time.
   std::vector<float> mixL,mixR;
   {
+    auto t=Clock::now();
     Audio input=loadWav(wav,offset,selected);
+    timing.load=since(t);t=Clock::now();
     if(rate==MODEL_RATE){mixL=std::move(input.planes[0]);mixR=std::move(input.planes[1]);}
     else{
       const RateChange down(147,160);
@@ -422,6 +617,7 @@ std::array<std::string,STEMS+1> extract(const std::string&modelPath,const std::s
       input.planes[0]=std::vector<float>();
       mixR=down.run(input.planes[1],frames);
     }
+    timing.downsample=since(t);
   }
   // Demucs scales the song as a whole first, and scales the stems back afterwards.
   double mean=0,square=0;
@@ -459,7 +655,10 @@ std::array<std::string,STEMS+1> extract(const std::string&modelPath,const std::s
         in[i]=inside?float((mixL[from+i]-mean)/deviation):0.f;
         in[SEGMENT+i]=inside?float((mixR[from+i]-mean)/deviation):0.f;
       }
+      const auto inferBegan=Clock::now();
       const float*out=model.run(in);
+      timing.infer+=since(inferBegan);
+      timing.gpuSections++;   // the first (only) session
       for(int s=0;s<STEMS;s++){
         if(FROM_MODEL[s]<0)continue;
         for(int c=0;c<2;c++){
@@ -513,6 +712,7 @@ std::array<std::string,STEMS+1> extract(const std::string&modelPath,const std::s
       written+=ready;
     }
     model.finish();
+    if(!profilePrefix.empty()){const std::string p=model.endProfiling();if(!p.empty()){say("PROFILE %s\n",p.c_str());placement(p);}}
     if(written!=frames)throw std::runtime_error("Assembled frame count mismatch");
     for(auto&f:files)if(f){
       if(fflush(f)!=0||ferror(f))throw std::runtime_error("Stem scratch flush failed");
@@ -521,6 +721,8 @@ std::array<std::string,STEMS+1> extract(const std::string&modelPath,const std::s
     }
   }
   const double modelSeconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count();
+  timing.sections=modelSeconds;
+  const auto tailBegan=Clock::now();
 
   // Back to the output rate, one stem at a time. Other is whatever the rest did not take.
   const RateChange up(160,147);
@@ -552,6 +754,8 @@ std::array<std::string,STEMS+1> extract(const std::string&modelPath,const std::s
   }
   std::vector<float>().swap(mixL);std::vector<float>().swap(mixR);
 
+  timing.upsample=since(tailBegan);
+  const auto writeBegan=Clock::now();
   // A shared gain keeps the stems summing to the song if any stem would clip.
   const double gain=peak>0.9999?0.9999/peak:1.;
   left.resize(outFrames);right.resize(outFrames);
@@ -578,6 +782,8 @@ std::array<std::string,STEMS+1> extract(const std::string&modelPath,const std::s
     }
     if(fflush(out.get())!=0||ferror(out.get()))throw std::runtime_error("WAV flush error");
   }
+  timing.write=since(writeBegan);
+  timing.total=since(serialBegan);
   for(int s=0;s<STEMS;s++){
     if(renameFile(scratch.partial[s],scratch.finals[s])!=0)
       throw std::runtime_error("Cannot finalize stem WAV");
@@ -589,6 +795,337 @@ std::array<std::string,STEMS+1> extract(const std::string&modelPath,const std::s
   char summary[400];
   snprintf(summary,sizeof summary,"%s|%d|%s|%d|%.1f|%ld|%.2f",duration==0?"song":duration==60?"60s":"10s",count,
      deviceName.c_str(),threads,modelSeconds,peakMegabytes(),20*std::log10(gain));
+  result[STEMS]=summary;
+  return result;
+}
+
+/** Which device ran each step, from ONNX Runtime's profile: steps and time per device, copies between them. */
+void placement(const std::string&path){
+  FILE*f=openFile(path,"rb");
+  if(!f){say("PLACEMENT none\n");return;}
+  std::map<std::string,std::pair<long,double>> by;  // provider -> (steps, ms)
+  long copies=0;double copyMs=0;
+  char line[8192];
+  while(fgets(line,sizeof line,f)){
+    if(!strstr(line,"\"cat\" : \"Node\"")||!strstr(line,"_kernel_time"))continue;
+    const char*d=strstr(line,"\"dur\" :");const char*pv=strstr(line,"\"provider\" : \"");const char*op=strstr(line,"\"op_name\" : \"");
+    if(!d||!pv)continue;
+    const double ms=atof(d+7)/1000.0;
+    std::string prov(pv+14);prov=prov.substr(0,prov.find('"'));
+    std::string name=op?std::string(op+13):"";name=name.substr(0,name.find('"'));
+    if(name.find("Memcpy")!=std::string::npos){copies++;copyMs+=ms;}
+    auto&e=by[prov];e.first++;e.second+=ms;
+  }
+  fclose(f);
+  for(auto&e:by)say("PLACEMENT %s steps=%ld ms=%.0f\n",e.first.c_str(),e.second.first,e.second.second);
+  say("PLACEMENT copies steps=%ld ms=%.0f\n",copies,copyMs);
+}
+
+/** Runs f(i) for i in [0, n) on up to `threads` threads. */
+void parallelFor(int n,int threads,const std::function<void(int)>&f){
+  threads=std::max(1,std::min(threads,n));
+  if(threads==1){for(int i=0;i<n;i++)f(i);return;}
+  std::atomic<int> next{0};
+  std::exception_ptr error;
+  std::mutex em;
+  std::vector<std::thread> pool;
+  for(int t=0;t<threads;t++)pool.emplace_back([&]{
+    try{for(int i;(i=next++)<n;)f(i);}
+    catch(...){std::lock_guard<std::mutex> g(em);if(!error)error=std::current_exception();next=n;}
+  });
+  for(auto&t:pool)t.join();
+  if(error)std::rethrow_exception(error);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The pipelined engine. Same model, sections, weights, rate changes, sum and 24-bit output as extract()
+// (the serial one, kept as the reference); only the order work is done in changes, so the files match.
+//   - The song is brought to 44.1 kHz on all processor threads at once (each sample computed as before).
+//   - One thread feeds the model; another assembles finished sections, makes Other, and converts each
+//     finished stretch to 48 kHz while the model works on the next section. At most three finished
+//     sections wait at once (triple buffering), so memory stays bounded.
+//   - parallel: a second session on the processor takes sections from the end of the song while the
+//     graphics card works from the start, as long as it can finish them before the card gets there.
+//   - The last step (24-bit files with the shared gain) writes the six files at once.
+// ---------------------------------------------------------------------------------------------------
+struct Plan{int primary=0;bool parallel=false;int inferThreads=1,cpuThreads=1,helpers=2;};
+
+std::array<std::string,STEMS+1> extractPipelined(const std::string&modelPath,const std::string&wav,
+  const std::string&folder,const std::string&prefix,int start,int duration,const Plan&plan){
+  if(busy.exchange(true))throw std::runtime_error("Already separating");
+  struct Guard{~Guard(){busy.store(false);cancelled.store(false);}}guard;
+  cancelled.store(stopAsked.load());   // a Stop that came before the run started still counts
+  timing=Timing();
+  const auto began=Clock::now();
+  if(start<0||start>1200||(duration!=0&&duration!=10&&duration!=60))
+    throw std::runtime_error("Unsupported preview duration/position");
+  const Audio info=loadWav(wav,0,0);
+  const size_t rate=info.rate,total=info.totalFrames;
+  const size_t preview=size_t(duration)*rate;
+  const size_t offset=duration==0?0:std::min(size_t(start)*rate,total>preview?total-preview:0);
+  const size_t selected=duration==0?total:std::min(preview,total-offset);
+  const size_t frames=(uint64_t(selected)*MODEL_RATE+rate/2)/rate;
+  const size_t outFrames=(uint64_t(selected)*OUT_RATE+rate/2)/rate;
+  if(outFrames==0)throw std::runtime_error("No audio to separate");
+  const uint64_t needed=uint64_t(outFrames)*(48+40)+150'000'000;
+#ifdef _WIN32
+  ULARGE_INTEGER freeBytes{};
+  if(!GetDiskFreeSpaceExW(wide(folder).c_str(),&freeBytes,nullptr,nullptr))throw std::runtime_error("Cannot check free space");
+  const uint64_t available=freeBytes.QuadPart;
+#else
+  struct statvfs fs{};
+  if(statvfs(folder.c_str(),&fs)!=0)throw std::runtime_error("Cannot check free space");
+  const uint64_t available=uint64_t(fs.f_bavail)*fs.f_frsize;
+#endif
+  if(available<needed)throw std::runtime_error("Storage low: need "+std::to_string((needed+999999)/1000000)+" MB free");
+
+  // The song at 44.1 kHz, both channels and all threads at once.
+  std::vector<float> mixL,mixR;
+  {
+    auto t=Clock::now();
+    Audio input=loadWav(wav,offset,selected);
+    timing.load=since(t);t=Clock::now();
+    if(rate==MODEL_RATE){mixL=std::move(input.planes[0]);mixR=std::move(input.planes[1]);}
+    else{
+      const RateChange down(147,160);
+      mixL.assign(frames,0.f);mixR.assign(frames,0.f);
+      const int pieces=std::max(2,plan.helpers*2);
+      const size_t per=(frames+pieces-1)/pieces;
+      parallelFor(pieces*2,plan.helpers,[&](int j){
+        const int c=j%2;const size_t from=size_t(j/2)*per,to=std::min(frames,from+per);
+        if(from<to)down.runRange(input.planes[c].data(),int64_t(input.planes[c].size()),from,to,(c?mixR:mixL).data()+from);
+      });
+    }
+    timing.downsample=since(t);
+  }
+  double mean=0,square=0;
+  for(size_t i=0;i<frames;i++){const double m=0.5*(mixL[i]+mixR[i]);mean+=m;square+=m*m;}
+  mean/=double(frames);
+  const double deviation=std::sqrt(std::max(1e-10,square/double(frames)-mean*mean));
+
+  Scratch scratch(folder,prefix);
+  const int count=int((frames+STRIDE-1)/STRIDE);
+  // Finished stems at 44.1 kHz (planar L, R per stem), filled as sections finish.
+  std::array<std::vector<float>,STEMS*2> stem44;
+  for(auto&v:stem44)v.assign(frames,0.f);
+  // 48 kHz floats go to a scratch file per stem in stretches (L then R), as they are made.
+  std::array<FILE*,STEMS> loud{};
+  struct Closer{std::array<FILE*,STEMS>&f;~Closer(){for(auto*x:f)if(x)fclose(x);}}closer{loud};
+  for(int s=0;s<STEMS;s++){loud[s]=openFile(scratch.loud[s],"wb");if(!loud[s])throw std::runtime_error("Cannot create temporary stem");}
+  std::vector<size_t> stretches;
+  const RateChange up(160,147);
+  size_t done48=0;
+  std::array<double,STEMS> peaks{};
+
+  // Sections finished by the model, waiting to be assembled, by section number.
+  std::mutex qm;std::condition_variable qcv;
+  std::map<int,std::pair<std::vector<float>,bool>> finished;   // section -> (stems, made on the processor's second session)
+  int front=0,back=count-1,gpuHeld=0,cpuHeld=0;
+  double gpuAvg=0,cpuAvg=0;
+  bool failed=false;std::exception_ptr error;
+  auto fail=[&](std::exception_ptr e){std::lock_guard<std::mutex> g(qm);if(!error)error=e;failed=true;qcv.notify_all();};
+  auto prepare=[&](int idx,std::vector<float>&in){
+    const size_t from=size_t(idx)*STRIDE;
+    for(size_t i=0;i<SEGMENT;i++){
+      const bool inside=from+i<frames;
+      in[i]=inside?float((mixL[from+i]-mean)/deviation):0.f;
+      in[SEGMENT+i]=inside?float((mixR[from+i]-mean)/deviation):0.f;
+    }
+  };
+  // One model on one device: takes sections (the card from the front, the processor from the back).
+  auto worker=[&](Model*model,bool fromBack){
+    try{
+      std::vector<float> in(SEGMENT*2);
+      for(;;){
+        int idx=-1;
+        {
+          std::unique_lock<std::mutex> l(qm);
+          for(;;){
+            if(failed||cancelled.load())return;
+            if(front>back)return;
+            if(!fromBack){
+              if(gpuHeld<3){idx=front++;break;}           // triple buffering
+            }else{
+              // Take the last section only if the card won't reach it first, and hold at most four.
+              const int left=back-front+1;
+              if(gpuAvg>0&&cpuHeld<4&&double(left)*gpuAvg>cpuAvg*1.25+gpuAvg){idx=back--;break;}
+              if(gpuAvg>0&&double(left)*gpuAvg<=cpuAvg*1.25+gpuAvg)return;  // not worth starting another
+            }
+            qcv.wait_for(l,std::chrono::milliseconds(50));
+          }
+        }
+        prepare(idx,in);
+        const auto t=Clock::now();
+        const float*out=model->run(in);
+        std::vector<float> copy(out,out+SEGMENT*2*STEMS);
+        const double took=since(t);
+        {
+          std::lock_guard<std::mutex> g(qm);
+          if(fromBack){cpuHeld++;timing.cpuSections++;timing.inferCpu+=took;cpuAvg=timing.inferCpu/timing.cpuSections;}
+          else{gpuHeld++;timing.gpuSections++;timing.inferGpu+=took;gpuAvg=timing.inferGpu/timing.gpuSections;}
+          finished[idx]=std::make_pair(std::move(copy),fromBack);
+        }
+        qcv.notify_all();
+      }
+    }catch(...){fail(std::current_exception());}
+  };
+
+  const auto sectionsBegan=Clock::now();
+  std::unique_ptr<Model> first(new Model(modelPath,plan.inferThreads,plan.primary));
+  std::unique_ptr<Model> second;
+  if(plan.parallel)second.reset(new Model(modelPath,plan.cpuThreads,0));
+  std::vector<std::thread> workers;
+  workers.emplace_back(worker,first.get(),false);
+  if(second)workers.emplace_back(worker,second.get(),true);
+  struct Joiner{std::vector<std::thread>&w;~Joiner(){for(auto&t:w)if(t.joinable())t.join();}}joiner{workers};
+
+  // Assembling, on this thread, in section order: the same arithmetic as extract().
+  std::vector<float> weight(SEGMENT),sum(SEGMENT,0.f);
+  for(size_t i=0;i<SEGMENT;i++)weight[i]=float(std::min(i+1,SEGMENT-i));
+  std::array<std::vector<float>,STEMS*2> held;
+  for(int s=0;s<STEMS;s++)if(FROM_MODEL[s]>=0)held[2*s].assign(SEGMENT,0.f),held[2*s+1].assign(SEGMENT,0.f);
+  std::array<std::vector<float>,STEMS> columns;
+  if(peakColumns>0)for(auto&c:columns)c.assign(size_t(peakColumns),0.f);
+  size_t written=0;
+  std::vector<float> chunk;
+  // If assembling fails, the model threads must stop too (they wait for room otherwise).
+  struct StopWorkers{std::mutex&m;std::condition_variable&cv;bool&failed;bool armed=true;
+    ~StopWorkers(){if(armed){{std::lock_guard<std::mutex> g(m);failed=true;}cv.notify_all();}}}stopWorkers{qm,qcv,failed};
+  for(int idx=0;idx<count;idx++){
+    std::vector<float> out;
+    {
+      std::unique_lock<std::mutex> l(qm);
+      while(!failed&&finished.find(idx)==finished.end()){
+        if(cancelled.load()){failed=true;qcv.notify_all();break;}
+        qcv.wait_for(l,std::chrono::milliseconds(50));
+      }
+      if(failed){l.unlock();for(auto&t:workers)if(t.joinable())t.join();if(error)std::rethrow_exception(error);checkCancel();throw std::runtime_error("Stopped");}
+      auto it=finished.find(idx);
+      out=std::move(it->second.first);
+      if(it->second.second)cpuHeld--;else gpuHeld--;
+      finished.erase(it);
+    }
+    qcv.notify_all();
+    const auto t=Clock::now();
+    say("SECTION %d %d\n",idx,count);
+    for(int s=0;s<STEMS;s++){
+      if(FROM_MODEL[s]<0)continue;
+      for(int c=0;c<2;c++){
+        const float*source=out.data()+size_t(FROM_MODEL[s])*2*SEGMENT+size_t(c)*SEGMENT;
+        float*into=held[2*s+c].data();
+        for(size_t i=0;i<SEGMENT;i++)into[i]+=source[i]*weight[i];
+      }
+    }
+    for(size_t i=0;i<SEGMENT;i++)sum[i]+=weight[i];
+    const size_t ready=std::min(STRIDE,frames-written);
+    for(int s=0;s<STEMS;s++){
+      if(FROM_MODEL[s]<0)continue;
+      for(int c=0;c<2;c++){
+        float*dest=stem44[2*s+c].data()+written;
+        for(size_t i=0;i<ready;i++){
+          const float x=float(double(held[2*s+c][i])/sum[i]*deviation+mean);
+          if(!std::isfinite(x))throw std::runtime_error("Invalid stem sample");
+          dest[i]=x;
+        }
+        auto&h=held[2*s+c];
+        std::copy(h.begin()+STRIDE,h.end(),h.begin());
+        std::fill(h.end()-STRIDE,h.end(),0.f);
+      }
+    }
+    std::copy(sum.begin()+STRIDE,sum.end(),sum.begin());
+    std::fill(sum.end()-STRIDE,sum.end(),0.f);
+    // Other: the song minus the five, subtracted in the same order as extract() does.
+    for(int c=0;c<2;c++){
+      const std::vector<float>&mix=c?mixR:mixL;
+      float*o=stem44[2*OTHER+c].data();
+      for(size_t i=written;i<written+ready;i++){
+        float x=mix[i];
+        for(int s:{0,1,2,4,5})x-=stem44[2*s+c][i];
+        o[i]=x;
+      }
+    }
+    if(peakColumns>0){
+      for(int s=0;s<STEMS;s++)for(int c=0;c<2;c++)for(size_t i=written;i<written+ready;i++){
+        float&col=columns[s][std::min(size_t(peakColumns-1),i*size_t(peakColumns)/frames)];
+        col=std::max(col,std::abs(stem44[2*s+c][i]));
+      }
+      const size_t first=written*size_t(peakColumns)/frames,last=std::min(size_t(peakColumns-1),(written+ready-1)*size_t(peakColumns)/frames);
+      std::string line;
+      for(int s=0;s<STEMS;s++){
+        line+="PEAKS ";line+=NAMES[s];line+=" "+std::to_string(first)+" ";
+        char v[16];
+        for(size_t b=first;b<=last;b++){snprintf(v,sizeof v,b==first?"%.3f":",%.3f",columns[s][b]);line+=v;}
+        line+="\n";
+      }
+      say("%s",line.c_str());
+    }
+    written+=ready;
+    timing.assemble+=since(t);
+    // Convert every 48 kHz sample whose filter now has all its input (all of them after the last section).
+    const auto u=Clock::now();
+    size_t target=done48;
+    if(written>=frames)target=outFrames;
+    else while(target<outFrames&&up.firstInput(target)+RateChange::taps()<=int64_t(written))target++;
+    if(target>done48){
+      const size_t n=target-done48;
+      chunk.assign(n*STEMS*2,0.f);
+      parallelFor(STEMS*2,plan.helpers,[&](int j){
+        up.runRange(stem44[j].data(),int64_t(frames),done48,target,chunk.data()+size_t(j)*n);
+      });
+      for(int s=0;s<STEMS;s++){
+        const float*l=chunk.data()+size_t(2*s)*n,*r=chunk.data()+size_t(2*s+1)*n;
+        for(size_t i=0;i<n;i++)peaks[s]=std::max(peaks[s],std::max(std::abs(double(l[i])),std::abs(double(r[i]))));
+        if(fwrite(l,sizeof(float),n,loud[s])!=n||fwrite(r,sizeof(float),n,loud[s])!=n)throw std::runtime_error("Scratch storage full");
+      }
+      stretches.push_back(n);
+      done48=target;
+    }
+    timing.upsample+=since(u);
+  }
+  stopWorkers.armed=false;
+  for(auto&t:workers)if(t.joinable())t.join();
+  {std::lock_guard<std::mutex> g(qm);if(error)std::rethrow_exception(error);}
+  timing.sections=since(sectionsBegan);
+  timing.infer=timing.inferGpu+timing.inferCpu;
+  first->finish();
+  if(!profilePrefix.empty()){const std::string p=first->endProfiling();if(!p.empty()){say("PROFILE %s\n",p.c_str());placement(p);}}
+  first.reset();second.reset();
+  for(auto&f:loud){if(fflush(f)!=0||ferror(f))throw std::runtime_error("Stem scratch flush failed");fclose(f);f=nullptr;}
+  for(auto&v:stem44)std::vector<float>().swap(v);
+  std::vector<float>().swap(mixL);std::vector<float>().swap(mixR);
+
+  // The shared gain, then all six 24-bit files at once.
+  const auto w=Clock::now();
+  double peak=0;for(double p:peaks)peak=std::max(peak,p);
+  const double gain=peak>0.9999?0.9999/peak:1.;
+  progress(2,0,STEMS);
+  parallelFor(STEMS,plan.helpers,[&](int s){
+    FileHandle in(scratch.loud[s],"rb");
+    FileHandle out(scratch.partial[s],"wb");
+    writeHeader(out.get(),outFrames);
+    std::vector<float> l,r;std::vector<uint8_t> pcm;
+    for(size_t n:stretches){
+      l.resize(n);r.resize(n);pcm.resize(n*6);
+      if(fread(l.data(),sizeof(float),n,in.get())!=n||fread(r.data(),sizeof(float),n,in.get())!=n)throw std::runtime_error("Temporary stem is incomplete");
+      for(size_t i=0;i<n;i++)for(int c=0;c<2;c++){
+        const double x=std::max(-1.,std::min(0.99999988079,double(c?r[i]:l[i])*gain));
+        const int32_t val=int32_t(std::llrint(x*8388608.));
+        uint8_t*p=pcm.data()+6*i+3*c;
+        p[0]=uint8_t(val);p[1]=uint8_t(val>>8);p[2]=uint8_t(val>>16);
+      }
+      if(fwrite(pcm.data(),1,6*n,out.get())!=6*n)throw std::runtime_error("24-bit WAV disk write error");
+    }
+    if(fflush(out.get())!=0||ferror(out.get()))throw std::runtime_error("WAV flush error");
+  });
+  for(int s=0;s<STEMS;s++){removeFile(scratch.loud[s]);if(renameFile(scratch.partial[s],scratch.finals[s])!=0)throw std::runtime_error("Cannot finalize stem WAV");scratch.partial[s].clear();}
+  timing.write=since(w);
+  timing.total=since(began);
+  progress(3,STEMS,STEMS);
+  std::array<std::string,STEMS+1> result{};
+  for(int s=0;s<STEMS;s++)result[s]=scratch.finals[s];
+  char summary[400];
+  snprintf(summary,sizeof summary,"%s|%d|%s|%d|%.1f|%ld|%.2f",duration==0?"song":duration==60?"60s":"10s",count,
+     deviceName.c_str(),plan.inferThreads,timing.infer,peakMegabytes(),20*std::log10(gain));
   result[STEMS]=summary;
   return result;
 }
@@ -655,6 +1192,12 @@ int run(int argc,char**argv){
      prefix=arg(argc,argv,"--prefix","song"),device=arg(argc,argv,"--device","auto");
   const int start=atoi(arg(argc,argv,"--start","0")),seconds=atoi(arg(argc,argv,"--seconds","0"));
   peakColumns=std::max(0,std::min(8192,atoi(arg(argc,argv,"--peaks","0"))));
+  // --mode serial (the reference) | pipelined | parallel (card plus a processor session);
+  // --gpu-way auto | fused | unfused | adapter; --monitor; --profile PREFIX; --cpu-threads N; --helpers N.
+  const std::string mode=arg(argc,argv,"--mode","serial"),gpuWay=arg(argc,argv,"--gpu-way","auto");
+  profilePrefix=arg(argc,argv,"--profile","");
+  bool monitorOn=false;
+  for(int i=1;i<argc;i++)monitorOn|=strcmp(argv[i],"--monitor")==0;
   const int cores=int(std::max(1u,std::thread::hardware_concurrency()));
   const int threads=atoi(arg(argc,argv,"--threads",std::to_string(std::max(1,std::min(cores-1,16))).c_str()));
   bool probe=false;
@@ -681,12 +1224,16 @@ int run(int argc,char**argv){
     cancelled.store(true);
   }).detach();
   std::vector<int> tries;
+  const int way=gpuWay=="fused"?2:gpuWay=="unfused"?3:gpuWay=="adapter"?1:0;
 #ifdef STEM_DIRECTML
-  if(device!="cpu"&&!bestGpu().empty()){tries.push_back(2);tries.push_back(1);}
+  if(device!="cpu"&&!bestGpu().empty()){if(way)tries.push_back(way);else{tries.push_back(2);tries.push_back(3);}}
 #else
-  if(device=="gpu")tries.push_back(2);
+  if(device=="gpu")tries.push_back(way?way:2);
 #endif
   if(device!="gpu"||tries.empty())tries.push_back(0);
+  // In parallel mode the processor session gets the threads the assembling does not need.
+  const int helpers=std::max(1,std::min(atoi(arg(argc,argv,"--helpers","4")),cores));
+  const int cpuThreads=std::max(1,atoi(arg(argc,argv,"--cpu-threads",std::to_string(std::max(1,cores-3)).c_str())));
   std::string lastError;
   for(size_t t=0;t<tries.size();t++){
     const int gpu=tries[t];
@@ -695,16 +1242,31 @@ int run(int argc,char**argv){
     else printf("DEVICE cpu %d\n",threads);
     fflush(stdout);
     try{
-      const auto results=extract(model,in,out,prefix,start,seconds,threads,gpu);
-      for(int s=0;s<STEMS;s++)printf("STEM %s %s\n",NAMES[s],results[s].c_str());
-      printf("DONE %s\n",results[STEMS].c_str());
-      fflush(stdout);
+      monitor.start(monitorOn);
+      std::array<std::string,STEMS+1> results;
+      try{
+        if(mode=="serial")results=extract(model,in,out,prefix,start,seconds,threads,gpu);
+        else{
+          Plan plan;plan.primary=gpu;plan.parallel=mode=="parallel";plan.helpers=helpers;
+          // On the processor alone, inference takes every thread; with a card, it needs one to feed it.
+          plan.inferThreads=threads;plan.cpuThreads=cpuThreads;
+          results=extractPipelined(model,in,out,prefix,start,seconds,plan);
+        }
+      }catch(...){monitor.stop();throw;}
+      const Monitor::Stats st=monitor.stop();
+      for(int s=0;s<STEMS;s++)say("STEM %s %s\n",NAMES[s],results[s].c_str());
+      say("TIMING mode=%s device=%s load=%.2f downsample=%.2f sections=%.2f infer=%.2f infer_first=%.2f infer_second=%.2f first_sections=%d second_sections=%d assemble=%.2f upsample=%.2f write=%.2f total=%.2f\n",
+        mode.c_str(),gpu==0?"cpu":gpu==2?"gpu-fused":gpu==3?"gpu-unfused":"gpu-adapter",timing.load,timing.downsample,timing.sections,timing.infer,timing.inferGpu,timing.inferCpu,
+        timing.gpuSections,timing.cpuSections,timing.assemble,timing.upsample,timing.write,timing.total);
+      say("STATS cpu_avg=%.0f cpu_max=%.0f proc_cpu_avg=%.0f gpu_avg=%.0f gpu_max=%.0f vram_peak=%ld shared_peak=%ld gpu_used_peak=%ld ram_peak=%ld temp_start=%ld temp_max=%ld power_max=%ld samples=%d\n",
+        st.cpuAvg,st.cpuMax,st.procCpuAvg,st.gpuAvg,st.gpuMax,st.vramPeak,st.sharedPeak,st.gpuUsedPeak,st.ramPeak,st.tempStart,st.tempMax,st.powerMax,st.samples);
+      say("DONE %s\n",results[STEMS].c_str());
       return 0;
     }catch(const std::exception&e){
       lastError=e.what();
       if(stopAsked.load())break;
       // The graphics card could not run it (no DirectX 12 card, driver, memory): try the processor.
-      if(gpu&&t+1<tries.size()){printf("FALLBACK %s\n",lastError.c_str());fflush(stdout);continue;}
+      if(gpu&&t+1<tries.size()){say("FALLBACK %s\n",lastError.c_str());continue;}
     }
   }
   printf("ERROR %s\n",stopAsked.load()?"Cancelled":lastError.c_str());
