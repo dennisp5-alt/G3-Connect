@@ -1,0 +1,104 @@
+name: Studio Quality probe (BS-RoFormer SW against HT-Demucs 6s)
+
+# Measures only: nothing is built for release and no production behaviour changes. The excerpts and the
+# BS-RoFormer SW weights are downloaded inside the run and never committed or uploaded; only numbers are kept.
+on:
+  workflow_dispatch:
+  push:
+    branches: ['experiment/studio-quality-roformer']
+    paths:
+      - 'experiments/studio-quality/**'
+      - '.github/workflows/studio-quality-probe.yml'
+
+permissions:
+  contents: read
+
+env:
+  HTDEMUCS_URL: 'https://huggingface.co/StemSplitio/htdemucs-6s-onnx/resolve/main/htdemucs_6s_fp16weights.onnx'
+  EXCERPTS: '12'
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Tools (PyTorch for the processor, bs-roformer-infer, musdb)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg > /dev/null
+          pip install --disable-pip-version-check -q torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          pip install --disable-pip-version-check -q bs-roformer-infer musdb soundfile scipy pyyaml
+          python -c "import torch; print('torch', torch.__version__, 'threads', torch.get_num_threads())"
+          nproc; free -g
+
+      - name: BS-RoFormer SW (fetched and hash-checked by bs-roformer-infer)
+        run: |
+          bs-roformer-download --list-models | head -40 || true
+          bs-roformer-download --model roformer-model-bs-roformer-sw-by-jarredou --output-dir models
+          ls -la models models/* || true
+          sha256sum $(find models -name '*.ckpt') | tee probe.txt
+          python experiments/studio-quality/model_facts.py "$(find models -name '*.ckpt' | head -1)" "$(find models -name '*.yaml' | head -1)" | tee -a probe.txt
+
+      - name: Stem Studio's engine (HT-Demucs 6s) for Linux, the baseline
+        run: |
+          V=1.13.8
+          curl -fLsS --retry 3 "https://github.com/k2-fsa/sherpa-onnx/releases/download/v$V/sherpa-onnx-v$V-linux-x64-shared.tar.bz2" -o /tmp/sherpa.tar.bz2
+          mkdir -p /tmp/sherpa && tar -xjf /tmp/sherpa.tar.bz2 -C /tmp/sherpa --strip-components=1
+          L=$(dirname "$(find /tmp/sherpa -name 'libonnxruntime*.so*' | head -1)")
+          # The same ONNX Runtime headers the phone build uses (matching sherpa-onnx 1.13.8's runtime).
+          H=/tmp/ortinc; mkdir -p $H
+          for X in onnxruntime_c_api.h onnxruntime_error_code.h onnxruntime_ep_c_api.h; do
+            curl -fLsS --retry 3 "https://raw.githubusercontent.com/microsoft/onnxruntime/v1.28.2/include/onnxruntime/core/session/$X" -o "$H/$X"
+          done
+          g++ -std=c++17 -O3 -I"$H" desktop/engine/stem_engine.cpp -o /tmp/stemengine -L"$L" -l:$(basename "$(find "$L" -name 'libonnxruntime*.so*' | head -1)") -Wl,-rpath,"$L" -lpthread
+          mkdir -p models && curl -fLsS --retry 3 "$HTDEMUCS_URL" -o models/htdemucs_6s.onnx
+
+      - name: Real-music excerpts with true stems (MUSDB18 7-second test previews)
+        run: python experiments/studio-quality/excerpts.py excerpts "$EXCERPTS" | tee -a probe.txt
+
+      - name: Separate with HT-Demucs 6s (Stem Studio's engine, processor)
+        run: |
+          start=$(date +%s.%N); peak=0
+          for d in excerpts/*/; do
+            /usr/bin/time -f "%M" -o /tmp/mem.txt /tmp/stemengine --model models/htdemucs_6s.onnx --in "$d/mix.wav" --out "$d" --prefix ht --device cpu > /dev/null
+            m=$(cat /tmp/mem.txt); [ "$m" -gt "$peak" ] && peak=$m
+          done
+          echo "TIME htdemucs_6s: $(echo "$(date +%s.%N) - $start" | bc) s for $EXCERPTS excerpts, peak memory $((peak / 1024)) MB" | tee -a probe.txt
+          python experiments/studio-quality/score.py excerpts htdemucs_6s '{dir}/ht_{stem}_24bit.wav' | tee -a probe.txt
+
+      - name: Separate with BS-RoFormer SW (PyTorch, processor)
+        run: |
+          mkdir -p sw-in sw-out
+          for d in excerpts/*/; do n=$(basename "$d"); cp "$d/mix.wav" "sw-in/$n.wav"; done
+          start=$(date +%s.%N)
+          /usr/bin/time -v bs-roformer-infer --input_folder sw-in --store_dir sw-out --models_dir models 2> sw-time.txt | tail -5
+          echo "TIME bs_roformer_sw: $(echo "$(date +%s.%N) - $start" | bc) s for $EXCERPTS excerpts, peak memory $(( $(grep 'Maximum resident' sw-time.txt | awk '{print $NF}') / 1024 )) MB" | tee -a probe.txt
+          find sw-out -type f | head -14
+          # Put each excerpt's stems beside its references, whatever the tool names them.
+          for d in excerpts/*/; do
+            n=$(basename "$d")
+            for s in vocals drums bass other guitar piano; do
+              f=$(find sw-out -type f -iname "*${n}*${s}*.wav" | head -1)
+              [ -z "$f" ] && f=$(find "sw-out/$n" -type f -iname "*${s}*.wav" 2>/dev/null | head -1)
+              [ -n "$f" ] && cp "$f" "$d/sw_${s}.wav"
+            done
+          done
+          python experiments/studio-quality/score.py excerpts bs_roformer_sw '{dir}/sw_{stem}.wav' | tee -a probe.txt
+
+      - name: Results
+        if: always()
+        run: cat probe.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: studio-quality-probe
+          path: |
+            probe.txt
+            score-*.json
+            sw-time.txt
+          retention-days: 30
