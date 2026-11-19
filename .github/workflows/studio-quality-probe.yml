@@ -52,12 +52,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # ONNX Runtime for Linux (headers and library from the same package): the first of these that exists.
-          for V in 1.24.4 1.24.3 1.24.2 1.24.1 1.23.2 1.22.1; do
-            curl -fLsS --retry 2 "https://github.com/microsoft/onnxruntime/releases/download/v$V/onnxruntime-linux-x64-$V.tgz" -o /tmp/ort.tgz && { echo "ONNX Runtime $V"; break; }
-          done
-          mkdir -p /tmp/ort && tar -xzf /tmp/ort.tgz -C /tmp/ort --strip-components=1
-          L=/tmp/ort/lib; H=/tmp/ort/include
+          # ONNX Runtime for Linux from its NuGet package (the same source as the Windows build), newest stable.
+          ORT=$(curl -fsSL https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/index.json | python -c "import sys,json; v=[x for x in json.load(sys.stdin)['versions'] if '-' not in x]; print(v[-1])")
+          echo "ONNX Runtime $ORT"
+          curl -fsSL -o /tmp/ort.zip "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/$ORT/microsoft.ml.onnxruntime.$ORT.nupkg"
+          mkdir -p /tmp/ort && cd /tmp/ort && unzip -q /tmp/ort.zip && cd - > /dev/null
+          L=/tmp/ort/runtimes/linux-x64/native; H=/tmp/ort/build/native/include
+          ls "$L" "$H"
           g++ -std=c++17 -O3 -I"$H" desktop/engine/stem_engine.cpp -o /tmp/stemengine -L"$L" -lonnxruntime -Wl,-rpath,"$L" -lpthread
           mkdir -p models && curl -fLsS --retry 3 "$HTDEMUCS_URL" -o models/htdemucs_6s.onnx
 
