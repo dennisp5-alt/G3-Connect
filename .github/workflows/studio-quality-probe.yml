@@ -67,7 +67,9 @@ jobs:
 
       - name: Separate with HT-Demucs 6s (Stem Studio's engine, processor)
         run: |
-          python experiments/studio-quality/timed.py htdemucs_6s "$EXCERPTS" 'for d in excerpts/*/; do /tmp/stemengine --model models/htdemucs_6s.onnx --in "$d/mix.wav" --out "$d" --prefix ht --device cpu > /dev/null || exit 1; done' | tee -a probe.txt
+          first=$(ls -d excerpts/*/ | head -1); mkdir -p /tmp/try
+          /tmp/stemengine --model models/htdemucs_6s.onnx --in "${first}mix.wav" --out /tmp/try --prefix try --device cpu --seconds 10 2>&1 | grep -v '^PEAKS' | tail -12 || true
+          python experiments/studio-quality/timed.py htdemucs_6s "$EXCERPTS" 'for d in excerpts/*/; do /tmp/stemengine --model models/htdemucs_6s.onnx --in "$d/mix.wav" --out "$d" --prefix ht --device cpu | grep -E "^(DONE|ERROR)" || exit 1; done' | tee -a probe.txt
           python experiments/studio-quality/score.py excerpts htdemucs_6s '{dir}/ht_{stem}_24bit.wav' | tee -a probe.txt
 
       - name: Separate with BS-RoFormer SW (PyTorch, processor)
