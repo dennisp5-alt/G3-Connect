@@ -52,11 +52,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # ONNX Runtime for Linux, the newest stable release (headers and library from the same package).
-          TAG=$(gh release list -R microsoft/onnxruntime --exclude-pre-releases --exclude-drafts --limit 10 --json tagName,isLatest -q '.[] | select(.isLatest) | .tagName')
-          test -n "$TAG" || TAG=$(gh release list -R microsoft/onnxruntime --exclude-pre-releases --limit 1 --json tagName -q '.[0].tagName')
-          echo "ONNX Runtime $TAG"
-          gh release download "$TAG" -R microsoft/onnxruntime -p "onnxruntime-linux-x64-${TAG#v}.tgz" -O /tmp/ort.tgz
+          # ONNX Runtime for Linux (headers and library from the same package): the first of these that exists.
+          for V in 1.24.4 1.24.3 1.24.2 1.24.1 1.23.2 1.22.1; do
+            curl -fLsS --retry 2 "https://github.com/microsoft/onnxruntime/releases/download/v$V/onnxruntime-linux-x64-$V.tgz" -o /tmp/ort.tgz && { echo "ONNX Runtime $V"; break; }
+          done
           mkdir -p /tmp/ort && tar -xzf /tmp/ort.tgz -C /tmp/ort --strip-components=1
           L=/tmp/ort/lib; H=/tmp/ort/include
           g++ -std=c++17 -O3 -I"$H" desktop/engine/stem_engine.cpp -o /tmp/stemengine -L"$L" -lonnxruntime -Wl,-rpath,"$L" -lpthread
