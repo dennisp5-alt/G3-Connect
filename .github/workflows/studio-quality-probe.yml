@@ -49,11 +49,15 @@ jobs:
           python experiments/studio-quality/model_facts.py "$(find models -name '*.ckpt' | head -1)" "$(find models -name '*.yaml' | head -1)" | tee -a probe.txt
 
       - name: Stem Studio's engine (HT-Demucs 6s) for Linux, the baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          # ONNX Runtime for Linux, the newest release (headers and library from the same package).
-          URL=$(curl -fsSL https://api.github.com/repos/microsoft/onnxruntime/releases/latest | python -c "import sys,json; print([a['browser_download_url'] for a in json.load(sys.stdin)['assets'] if a['name'].startswith('onnxruntime-linux-x64-') and a['name'].endswith('.tgz') and 'gpu' not in a['name']][0])")
-          echo "$URL"
-          mkdir -p /tmp/ort && curl -fLsS --retry 3 "$URL" | tar -xz -C /tmp/ort --strip-components=1
+          # ONNX Runtime for Linux, the newest stable release (headers and library from the same package).
+          TAG=$(gh release list -R microsoft/onnxruntime --exclude-pre-releases --exclude-drafts --limit 10 --json tagName,isLatest -q '.[] | select(.isLatest) | .tagName')
+          test -n "$TAG" || TAG=$(gh release list -R microsoft/onnxruntime --exclude-pre-releases --limit 1 --json tagName -q '.[0].tagName')
+          echo "ONNX Runtime $TAG"
+          gh release download "$TAG" -R microsoft/onnxruntime -p "onnxruntime-linux-x64-${TAG#v}.tgz" -O /tmp/ort.tgz
+          mkdir -p /tmp/ort && tar -xzf /tmp/ort.tgz -C /tmp/ort --strip-components=1
           L=/tmp/ort/lib; H=/tmp/ort/include
           g++ -std=c++17 -O3 -I"$H" desktop/engine/stem_engine.cpp -o /tmp/stemengine -L"$L" -lonnxruntime -Wl,-rpath,"$L" -lpthread
           mkdir -p models && curl -fLsS --retry 3 "$HTDEMUCS_URL" -o models/htdemucs_6s.onnx
