@@ -601,7 +601,8 @@ std::string bestGpu(){
     DXGI_ADAPTER_DESC1 d{};
     adapter->GetDesc1(&d);
     adapter->Release();
-    if(d.Flags&DXGI_ADAPTER_FLAG_SOFTWARE)continue;
+    // Software adapters (Microsoft Basic Render Driver, WARP) are no faster than the processor.
+    if((d.Flags&DXGI_ADAPTER_FLAG_SOFTWARE)||d.VendorId==0x1414)continue;
     found=utf8(d.Description)+"|"+std::to_string(d.DedicatedVideoMemory/1048576);
     break;
   }

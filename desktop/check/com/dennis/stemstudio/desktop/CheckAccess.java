@@ -56,14 +56,16 @@ public final class CheckAccess {
         ok(format, "48 kHz, 24-bit stereo, all the same length (" + frames + " frames)");
         ok(peakLines.get() >= 6 * sections.get(), "live overviews after every part (" + peakLines.get() + " lines)");
         // The live overview matches the finished files (the 48 kHz files are the same audio, resampled).
-        double worst = 0;
+        // Compared on the mix's scale (as the lanes draw them): a near-silent stem's tiny peaks are rounded away live.
+        double worst = 0, scale = 0;
+        for (float v : WavFile.peaks(song, Demo.N)) scale = Math.max(scale, v);
         for (int i = 0; i < 6; i++) {
             float[] fin = WavFile.peaks(r.stems()[i], Demo.N);
-            double a = 0, b = 0;
-            for (int k = 0; k < Demo.N; k++) { a += live[i][k]; b += fin[k]; }
-            worst = Math.max(worst, Math.abs(a - b) / Math.max(1e-6, b));
+            double d = 0;
+            for (int k = 0; k < Demo.N; k++) d += Math.abs(live[i][k] - fin[k]);
+            worst = Math.max(worst, d / Demo.N / Math.max(1e-6, scale));
         }
-        ok(worst < 0.08, String.format(Locale.US, "live overviews match the finished stems (worst %.1f%% apart)", worst * 100));
+        ok(worst < 0.02, String.format(Locale.US, "live overviews match the finished stems (worst %.2f%% of full scale apart)", worst * 100));
 
         // Played together at 0 dB they are the song again.
         try (StemPlayer p = new StemPlayer(r.stems()); WavFile src = new WavFile(song)) {
