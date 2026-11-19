@@ -16,6 +16,12 @@ from onnx import utils, shape_inference
 src, head_path, tail_path = sys.argv[1], sys.argv[2], sys.argv[3]
 model = onnx.load(src)
 g = model.graph
+# Steps are tracked by name, so every step needs a unique one.
+seen = set()
+for k, n in enumerate(g.node):
+    if not n.name or n.name in seen:
+        n.name = f'{n.name or "step"}__{k}'
+    seen.add(n.name)
 init = {i.name for i in g.initializer}
 graph_inputs = [i.name for i in g.input if i.name not in init]
 graph_outputs = [o.name for o in g.output]
@@ -75,25 +81,43 @@ print('TAIL steps', len(tail), 'of', len(g.node), '(of which constant-only:', le
 print('BOUNDARY', boundary)
 
 head_outputs = [b for b in boundary if b not in graph_inputs]
-# Shape inference cannot follow every step of this model, so the crossing tensors may have no
-# recorded type; they are float activations (weights are cast to float before use). The check
-# below runs both halves, so a wrong type would fail there.
-known = {v.name for v in list(g.value_info) + list(g.input) + list(g.output)}
-for b in boundary:
-    if b not in known:
-        g.value_info.append(onnx.helper.make_tensor_value_info(b, onnx.TensorProto.FLOAT, None))
-e = utils.Extractor(model)
-known = {v.name for v in list(e.graph.value_info) + list(e.graph.input) + list(e.graph.output)}
-for b in boundary:
-    if b not in e.vimap:
-        e.vimap[b] = onnx.helper.make_tensor_value_info(b, onnx.TensorProto.FLOAT, None)
-head = e.extract_model(graph_inputs, head_outputs)
-tailm = e.extract_model(boundary, graph_outputs)
+# Each half is cut out directly (onnx.utils.Extractor needs a recorded type for every crossing
+# tensor, which shape inference cannot give for this model). The crossing tensors are float
+# activations (weights are cast to float before use); the check below runs both halves, so a wrong
+# type would fail there.
+def piece(name, wanted_nodes, inputs, outputs):
+    nodes = [n for n in g.node if n.name in wanted_nodes]
+    used = {i for n in nodes for i in n.input}
+    inits = [t for t in g.initializer if t.name in used]
+    typed = {v.name: v for v in list(g.input) + list(g.output) + list(g.value_info)}
+    vi = lambda n: typed.get(n) or onnx.helper.make_tensor_value_info(n, onnx.TensorProto.FLOAT, None)
+    graph = onnx.helper.make_graph(nodes, name, [vi(n) for n in inputs], [vi(n) for n in outputs], inits)
+    m = onnx.helper.make_model(graph, opset_imports=model.opset_import, producer_name='stem-studio-split')
+    m.ir_version = model.ir_version
+    return m
+
+# The head: every step the crossing tensors need, walking back from them.
+need = set()
+stack = [producer[b] for b in head_outputs if b in producer]
+while stack:
+    n = stack.pop()
+    if n.name in need:
+        continue
+    need.add(n.name)
+    for i in n.input:
+        if i in producer:
+            stack.append(producer[i])
+head = piece('head', need, graph_inputs, head_outputs)
+tailm = piece('tail', tail, boundary, graph_outputs)
+print('HEAD steps', len(need))
 onnx.save(head, head_path)
 onnx.save(tailm, tail_path)
 
 # What crosses, with sizes (shape inference on the head).
-inferred = shape_inference.infer_shapes(head)
+try:
+    inferred = shape_inference.infer_shapes(head)
+except Exception as ex:
+    print('shape inference on the head failed:', ex); inferred = head
 shapes = {v.name: v for v in list(inferred.graph.value_info) + list(inferred.graph.output)}
 for b in boundary:
     v = shapes.get(b)
