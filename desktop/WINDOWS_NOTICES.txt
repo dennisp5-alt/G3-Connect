@@ -1,0 +1,20 @@
+Stem Studio for Windows - what is inside and under which licences
+
+Separation model: HT-Demucs 6-stem (Rouard, Massa and Defossez, Meta AI, 2023), MIT licence,
+https://github.com/facebookresearch/demucs. ONNX export by StemSplit (huggingface.co/StemSplitio/htdemucs-6s-onnx),
+MIT licence. Shipped as models\htdemucs_6s.onnx.
+
+ONNX Runtime with DirectML - Copyright Microsoft Corporation, MIT licence. engine\onnxruntime.dll,
+licence in engine\LICENSE-onnxruntime.txt.
+
+DirectML - Copyright Microsoft Corporation, redistributable under its licence in engine\LICENSE-DirectML.txt.
+engine\DirectML.dll.
+
+FFmpeg - LGPL build by BtbN (https://github.com/BtbN/FFmpeg-Builds), ffmpeg\ffmpeg.exe, licence in
+ffmpeg\LICENSE-FFmpeg-LGPL.txt. Used as a separate program to read MP3, FLAC, M4A and other formats.
+
+Inter typeface - Copyright 2016-2023 The Inter Project Authors, SIL Open Font Licence 1.1 (OFL-Inter.txt).
+
+Java runtime - Eclipse Temurin (OpenJDK), GPL v2 with the Classpath Exception, in the runtime folder.
+
+Stem Studio's own code: desktop\ and app\ in https://github.com/dennisp5-alt/G3-Connect.
