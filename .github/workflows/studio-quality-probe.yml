@@ -45,16 +45,12 @@ jobs:
 
       - name: Stem Studio's engine (HT-Demucs 6s) for Linux, the baseline
         run: |
-          V=1.13.8
-          curl -fLsS --retry 3 "https://github.com/k2-fsa/sherpa-onnx/releases/download/v$V/sherpa-onnx-v$V-linux-x64-shared.tar.bz2" -o /tmp/sherpa.tar.bz2
-          mkdir -p /tmp/sherpa && tar -xjf /tmp/sherpa.tar.bz2 -C /tmp/sherpa --strip-components=1
-          L=$(dirname "$(find /tmp/sherpa -name 'libonnxruntime*.so*' | head -1)")
-          # The same ONNX Runtime headers the phone build uses (matching sherpa-onnx 1.13.8's runtime).
-          H=/tmp/ortinc; mkdir -p $H
-          for X in onnxruntime_c_api.h onnxruntime_error_code.h onnxruntime_ep_c_api.h; do
-            curl -fLsS --retry 3 "https://raw.githubusercontent.com/microsoft/onnxruntime/v1.28.2/include/onnxruntime/core/session/$X" -o "$H/$X"
-          done
-          g++ -std=c++17 -O3 -I"$H" desktop/engine/stem_engine.cpp -o /tmp/stemengine -L"$L" -l:$(basename "$(find "$L" -name 'libonnxruntime*.so*' | head -1)") -Wl,-rpath,"$L" -lpthread
+          # ONNX Runtime for Linux, the newest release (headers and library from the same package).
+          URL=$(curl -fsSL https://api.github.com/repos/microsoft/onnxruntime/releases/latest | python -c "import sys,json; print([a['browser_download_url'] for a in json.load(sys.stdin)['assets'] if a['name'].startswith('onnxruntime-linux-x64-') and a['name'].endswith('.tgz') and 'gpu' not in a['name']][0])")
+          echo "$URL"
+          mkdir -p /tmp/ort && curl -fLsS --retry 3 "$URL" | tar -xz -C /tmp/ort --strip-components=1
+          L=/tmp/ort/lib; H=/tmp/ort/include
+          g++ -std=c++17 -O3 -I"$H" desktop/engine/stem_engine.cpp -o /tmp/stemengine -L"$L" -lonnxruntime -Wl,-rpath,"$L" -lpthread
           mkdir -p models && curl -fLsS --retry 3 "$HTDEMUCS_URL" -o models/htdemucs_6s.onnx
 
       - name: Real-music excerpts with true stems (MUSDB18 7-second test previews)
