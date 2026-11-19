@@ -1,0 +1,94 @@
+name: Stem Studio for Windows
+
+# The phone's six-stem engine built for Windows (graphics card through DirectML, or the processor),
+# timed and checked on Windows. Nothing in app/ is built or changed here.
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feature/windows-desktop']
+    paths:
+      - 'desktop/**'
+      - '.github/workflows/stem-studio-windows.yml'
+
+permissions:
+  contents: read
+
+env:
+  MODEL_URL: 'https://huggingface.co/StemSplitio/htdemucs-6s-onnx/resolve/main/htdemucs_6s_fp16weights.onnx'
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: ONNX Runtime with DirectML, and DirectML (newest stable NuGet packages)
+        run: |
+          latest() { curl -fsSL "https://api.nuget.org/v3-flatcontainer/$1/index.json" | python -c "import sys,json; v=[x for x in json.load(sys.stdin)['versions'] if '-' not in x]; print(v[-1])"; }
+          ORT=$(latest microsoft.ml.onnxruntime.directml); DML=$(latest microsoft.ai.directml)
+          echo "ONNX Runtime DirectML $ORT, DirectML $DML" | tee runtime-versions.txt
+          curl -fsSL -o ort.zip "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/$ORT/microsoft.ml.onnxruntime.directml.$ORT.nupkg"
+          curl -fsSL -o dml.zip "https://api.nuget.org/v3-flatcontainer/microsoft.ai.directml/$DML/microsoft.ai.directml.$DML.nupkg"
+          mkdir -p ort dml build/engine
+          7z x -y -oort ort.zip > /dev/null
+          7z x -y -odml dml.zip > /dev/null
+          ls ort/build/native/include ort/runtimes/win-x64/native dml/bin/x64-win
+          cp ort/runtimes/win-x64/native/onnxruntime.dll dml/bin/x64-win/DirectML.dll build/engine/
+          cp ort/LICENSE* build/engine/LICENSE-onnxruntime.txt 2>/dev/null || true
+          cp dml/LICENSE* build/engine/LICENSE-DirectML.txt 2>/dev/null || true
+
+      - name: Compile the engine
+        shell: cmd
+        run: |
+          cl /nologo /O2 /EHsc /std:c++17 /utf-8 /W3 /DSTEM_DIRECTML /Iort\build\native\include desktop\engine\stem_engine.cpp /Fe:build\engine\stemengine.exe /link /LIBPATH:ort\runtimes\win-x64\native onnxruntime.lib psapi.lib
+          if errorlevel 1 exit /b 1
+          dir build\engine
+
+      - name: The six-stem model (HT-Demucs 6s, MIT)
+        run: |
+          mkdir -p models
+          curl -fLsS --retry 3 "$MODEL_URL" -o models/htdemucs_6s.onnx
+          ls -la models; sha256sum models/*
+
+      - name: A test song (synthetic, 70 seconds)
+        run: |
+          pip install --disable-pip-version-check -q numpy scipy
+          python experiments/four-stem/bench/make_song.py song.wav 70
+
+      - name: Separate 60 seconds on the processor (time, memory, the sum)
+        run: |
+          set -o pipefail
+          mkdir -p out-cpu
+          nproc || echo "$NUMBER_OF_PROCESSORS cores"
+          start=$(date +%s)
+          build/engine/stemengine.exe --model models/htdemucs_6s.onnx --in song.wav --out out-cpu --prefix s --device cpu --seconds 60 | grep -v '^SECTION [1-9]' | tee engine-cpu.txt
+          echo "Wall time: $(( $(date +%s) - start )) s" | tee -a engine-cpu.txt
+          grep -q '^DONE' engine-cpu.txt
+          python experiments/six-stem/check_sum.py song.wav out-cpu s | tee -a engine-cpu.txt
+
+      - name: Separate 10 seconds through DirectML (the runner has no real graphics card; this proves the path)
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mkdir -p out-gpu
+          start=$(date +%s)
+          build/engine/stemengine.exe --model models/htdemucs_6s.onnx --in song.wav --out out-gpu --prefix s --device auto --seconds 10 | grep -v '^SECTION [1-9]' | tee engine-gpu.txt
+          echo "Wall time: $(( $(date +%s) - start )) s" | tee -a engine-gpu.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: StemStudio-Windows-engine
+          path: |
+            build/engine
+            engine-*.txt
+            runtime-versions.txt
+          retention-days: 30
