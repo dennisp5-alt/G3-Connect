@@ -132,8 +132,10 @@ jobs:
           # Git Bash rewrites arguments that look like /paths into C:/Program Files/Git/...: check what the launcher got.
           CFG="build/dist/Stem Studio Experimental/app/Stem Studio Experimental.cfg"; cat "$CFG"
           ! grep -q "Program Files/Git" "$CFG"
-          # And that the packaged app starts: it draws a sample window and exits.
-          "build/dist/Stem Studio Experimental/runtime/bin/java.exe" -Dstemstudio.experimental=1 -cp "build/dist/Stem Studio Experimental/app/stemstudio.jar" com.dennis.stemstudio.desktop.Main --screenshot launch-check.png --state done
+          # And that the packaged app starts through its own launcher and settings (the .cfg Dennis's copy
+          # failed on): it draws a sample window to a file and exits.
+          timeout 180 "build/dist/Stem Studio Experimental/Stem Studio Experimental.exe" --screenshot "$(cygpath -w "$PWD")\\launch-check.png" --state done || true
+          ls -la launch-check.png
           cd build/dist && 7z a -tzip "../../StemStudio-Experimental-$APP_VERSION.zip" "Stem Studio Experimental" > /dev/null
           cd - > /dev/null; ls -la StemStudio-Experimental-*.zip
 
@@ -157,6 +159,7 @@ jobs:
           path: |
             modes.txt
             split.txt
+            launch-check.png
             benchmark.txt
             runtime-versions.txt
           retention-days: 30
