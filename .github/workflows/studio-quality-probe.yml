@@ -59,6 +59,8 @@ jobs:
           mkdir -p /tmp/ort && cd /tmp/ort && unzip -q /tmp/ort.zip && cd - > /dev/null
           L=/tmp/ort/runtimes/linux-x64/native; H=/tmp/ort/build/native/include
           ls "$L" "$H"
+          # The library is linked by its versioned name.
+          [ -e "$L/libonnxruntime.so.1" ] || ln -s libonnxruntime.so "$L/libonnxruntime.so.1"
           g++ -std=c++17 -O3 -I"$H" desktop/engine/stem_engine.cpp -o /tmp/stemengine -L"$L" -lonnxruntime -Wl,-rpath,"$L" -lpthread
           mkdir -p models && curl -fLsS --retry 3 "$HTDEMUCS_URL" -o models/htdemucs_6s.onnx
 
@@ -73,6 +75,8 @@ jobs:
           python experiments/studio-quality/score.py excerpts htdemucs_6s '{dir}/ht_{stem}_24bit.wav' | tee -a probe.txt
 
       - name: Separate with BS-RoFormer SW (PyTorch, processor)
+        # SW's scores are deterministic and already measured; a "[baseline only]" commit skips the 20-minute rerun.
+        if: ${{ !contains(github.event.head_commit.message, '[baseline only]') }}
         run: |
           mkdir -p sw-in sw-out
           for d in excerpts/*/; do n=$(basename "$d"); cp "$d/mix.wav" "sw-in/$n.wav"; done
