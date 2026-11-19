@@ -67,21 +67,15 @@ jobs:
 
       - name: Separate with HT-Demucs 6s (Stem Studio's engine, processor)
         run: |
-          start=$(date +%s.%N); peak=0
-          for d in excerpts/*/; do
-            /usr/bin/time -f "%M" -o /tmp/mem.txt /tmp/stemengine --model models/htdemucs_6s.onnx --in "$d/mix.wav" --out "$d" --prefix ht --device cpu > /dev/null
-            m=$(cat /tmp/mem.txt); [ "$m" -gt "$peak" ] && peak=$m
-          done
-          echo "TIME htdemucs_6s: $(echo "$(date +%s.%N) - $start" | bc) s for $EXCERPTS excerpts, peak memory $((peak / 1024)) MB" | tee -a probe.txt
+          python experiments/studio-quality/timed.py htdemucs_6s "$EXCERPTS" 'for d in excerpts/*/; do /tmp/stemengine --model models/htdemucs_6s.onnx --in "$d/mix.wav" --out "$d" --prefix ht --device cpu > /dev/null || exit 1; done' | tee -a probe.txt
           python experiments/studio-quality/score.py excerpts htdemucs_6s '{dir}/ht_{stem}_24bit.wav' | tee -a probe.txt
 
       - name: Separate with BS-RoFormer SW (PyTorch, processor)
         run: |
           mkdir -p sw-in sw-out
           for d in excerpts/*/; do n=$(basename "$d"); cp "$d/mix.wav" "sw-in/$n.wav"; done
-          start=$(date +%s.%N)
-          /usr/bin/time -v bs-roformer-infer --input_folder sw-in --store_dir sw-out --models_dir models 2> sw-time.txt | tail -5
-          echo "TIME bs_roformer_sw: $(echo "$(date +%s.%N) - $start" | bc) s for $EXCERPTS excerpts, peak memory $(( $(grep 'Maximum resident' sw-time.txt | awk '{print $NF}') / 1024 )) MB" | tee -a probe.txt
+          python experiments/studio-quality/timed.py bs_roformer_sw "$EXCERPTS" 'bs-roformer-infer --input_folder sw-in --store_dir sw-out --models_dir models > sw-log.txt 2>&1' | tee -a probe.txt
+          tail -5 sw-log.txt
           find sw-out -type f | head -14
           # Put each excerpt's stems beside its references, whatever the tool names them.
           for d in excerpts/*/; do
@@ -105,5 +99,5 @@ jobs:
           path: |
             probe.txt
             score-*.json
-            sw-time.txt
+            sw-log.txt
           retention-days: 30
