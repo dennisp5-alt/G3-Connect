@@ -9,6 +9,7 @@ def read24(path):
     return np.where(v >= 1 << 23, v - (1 << 24), v)
 
 ref, got, label = sys.argv[1], sys.argv[2], sys.argv[3]
+limit = float(sys.argv[4]) if len(sys.argv) > 4 else None  # fail when the worst stem's difference is above this (dB)
 worst_db, worst_lsb, same = -999.0, 0, 0
 for f in sorted(glob.glob(os.path.join(ref, '*.wav'))):
     g = os.path.join(got, os.path.basename(f))
@@ -19,4 +20,6 @@ for f in sorted(glob.glob(os.path.join(ref, '*.wav'))):
         sys.exit(f'COMPARE {label}: length differs on {os.path.basename(f)}')
     d = np.abs(x - y); worst_lsb = max(worst_lsb, int(d.max()))
     worst_db = max(worst_db, 10 * np.log10(np.sum(d.astype(np.float64) ** 2) / max(1, np.sum(x.astype(np.float64) ** 2))))
-print(f'COMPARE {label}: {same} of 6 identical; largest difference {worst_lsb} steps of 24-bit, {worst_db:.1f} dB below the stem (worst)')
+print(f'COMPARE {label}: {same} of 6 identical; largest difference {worst_lsb} steps of 24-bit, worst stem difference {worst_db:.1f} dB relative to the stem')
+if limit is not None and worst_db > limit:
+    sys.exit(f'COMPARE_FAIL {label}: above {limit} dB')

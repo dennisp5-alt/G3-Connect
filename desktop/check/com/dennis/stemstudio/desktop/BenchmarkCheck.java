@@ -17,6 +17,6 @@ public final class BenchmarkCheck {
         File report = Benchmark.run(new File(a[0]), "Check song", 0, probe, System.out::println);
         String text = Files.readString(report.toPath());
         System.out.println(text);
-        System.out.println(text.contains("identical to the reference, byte for byte") ? "BENCHMARK_CHECK_PASS" : "BENCHMARK_CHECK_FAIL");
+        System.out.println(text.contains("identical, byte for byte") ? "BENCHMARK_CHECK_PASS" : "BENCHMARK_CHECK_FAIL");
     }
 }

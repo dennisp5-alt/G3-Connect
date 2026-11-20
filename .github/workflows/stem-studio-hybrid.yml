@@ -109,6 +109,14 @@ jobs:
           $E --model build/app/models/htdemucs_6s_head.onnx --tail build/app/models/htdemucs_6s_tail.onnx --in song.wav --out out-split --prefix m --device cpu --mode serial --seconds 60 --monitor | grep -E '^(TIMING|STATS|ERROR|DONE)' | tee -a modes.txt
           python experiments/hybrid/compare_wavs.py out-serial out-split split | tee -a modes.txt
           python experiments/six-stem/check_sum.py song.wav out-split m | tee -a modes.txt
+          # The native inverse STFT in place of the model's tail: the same stems to float rounding (the
+          # model's tail uses half-precision tables), and how much faster.
+          for m in serial pipelined; do
+            mkdir -p out-native-$m
+            $E --model build/app/models/htdemucs_6s_head.onnx --tail build/app/models/htdemucs_6s_tail.onnx --native-istft --in song.wav --out out-native-$m --prefix m --device cpu --mode $m --seconds 60 --monitor | grep -E '^(TIMING|STATS|ERROR|DONE)' | tee -a modes.txt
+            python experiments/hybrid/compare_wavs.py out-split out-native-$m native-$m -70 | tee -a modes.txt
+          done
+          python experiments/six-stem/check_sum.py song.wav out-native-serial m | tee -a modes.txt
 
       - name: The app's benchmark, as the button runs it
         run: |

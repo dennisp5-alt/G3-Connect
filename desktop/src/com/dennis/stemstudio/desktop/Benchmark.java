@@ -41,13 +41,14 @@ final class Benchmark {
         w.add(new Way("Processor, pipelined", List.of("--device", "cpu", "--mode", "pipelined"), false));
         if (hasGpu && canSplit()) {
             // The model split in two: everything up to the inverse STFT on the card, the rest on the processor.
-            w.add(new Way("Split fused, serial", List.of("--device", "gpu", "--gpu-way", "fused", "--mode", "serial"), true, true));
+            // Fused DirectML gave corrupted stems on Dennis's RTX 3050 (+64 dB difference); one run keeps checking.
             w.add(new Way("Split unfused, serial", List.of("--device", "gpu", "--gpu-way", "unfused", "--mode", "serial"), true, true));
-            w.add(new Way("Split fused, overlapped", List.of("--device", "gpu", "--gpu-way", "fused", "--mode", "pipelined"), true, true));
             w.add(new Way("Split unfused, overlapped", List.of("--device", "gpu", "--gpu-way", "unfused", "--mode", "pipelined"), true, true));
-            w.add(new Way("Split fused + CPU sections", List.of("--device", "gpu", "--gpu-way", "fused", "--mode", "parallel"), true, true));
+            w.add(new Way("Split unfused, native iSTFT", List.of("--device", "gpu", "--gpu-way", "unfused", "--mode", "serial", "--native-istft"), true, true));
+            w.add(new Way("Split unfused, native, overlapped", List.of("--device", "gpu", "--gpu-way", "unfused", "--mode", "pipelined", "--native-istft"), true, true));
+            w.add(new Way("Split unfused + CPU sections", List.of("--device", "gpu", "--gpu-way", "unfused", "--mode", "parallel", "--native-istft"), true, true));
+            w.add(new Way("Split fused, serial (check)", List.of("--device", "gpu", "--gpu-way", "fused", "--mode", "serial"), true, true));
         }
-        if (hasGpu) w.add(new Way("Whole model on card, fused", List.of("--device", "gpu", "--gpu-way", "fused", "--mode", "serial"), true));
         return w;
     }
 
@@ -60,6 +61,7 @@ final class Benchmark {
         final List<String> placement = new ArrayList<>();
         File[] stems;
         String match = "", match2 = "";
+        double matchDb = Double.NaN;  // the worst stem's difference against the reference, dB (−inf: identical)
         Run(Way way) { this.way = way; }
     }
 
@@ -96,11 +98,11 @@ final class Benchmark {
             Run r = one(way, wav, new File(root, "run" + (i + 1)), start, 60, null);
             runs.add(r);
             if (i == 0) reference = r;
-            if (r.ok && reference != null && reference.ok && r != reference) r.match = compare(reference.stems, r.stems);
+            if (r.ok && reference != null && reference.ok && r != reference) { r.match = compare(reference.stems, r.stems); r.matchDb = lastDb; }
             // The card's own reference: the pipelined and parallel card runs against the card's serial run.
             // Each overlapped split run against the serial split run on the same card way (same devices, so any
             // difference is the overlapping's).
-            String serialLabel = r.way.label().replace("overlapped", "serial").replace(" + CPU sections", ", serial");
+            String serialLabel = r.way.label().replace("native, overlapped", "native iSTFT").replace("overlapped", "serial").replace(" + CPU sections", ", native iSTFT");
             Run cardSerial = runs.stream().filter(x -> x.way.label().equals(serialLabel) && x.ok).findFirst().orElse(null);
             if (r.ok && cardSerial != null && r != cardSerial) r.match2 = compare(cardSerial.stems, r.stems);
         }
@@ -109,7 +111,7 @@ final class Benchmark {
         if (probe.hasGpu() && !stopped) {
             said.accept("Profiling which device runs each step (10 seconds)");
             String prefix = new File(root, "profile").getAbsolutePath();
-            placement = one(new Way("Profile, split fused", List.of("--device", "gpu", "--gpu-way", "fused", "--mode", "serial", "--profile", prefix), true, canSplit()),
+            placement = one(new Way("Profile, split unfused", List.of("--device", "gpu", "--gpu-way", "unfused", "--mode", "serial", "--profile", prefix), true, canSplit()),
                 wav, new File(root, "profile"), start, 10, null);
         }
         File report = new File(root, "benchmark report.txt");
@@ -171,6 +173,14 @@ final class Benchmark {
      * Each stem against the reference run: same length, the largest difference in 24-bit steps, and the
      * difference as a level below the stem (identical files: "identical").
      */
+    /**
+     * A run matches when every stem's difference from the reference is at least 50 dB below the stem: far
+     * under the model's own separation error (about 6 to 9 dB below), so it is arithmetic rounding (the card
+     * and the processor round floats differently), not a change in separation.
+     */
+    static final double MATCH_DB = -50;
+    private static double lastDb;
+
     static String compare(File[] ref, File[] got) {
         StringBuilder b = new StringBuilder();
         boolean allSame = true;
@@ -197,8 +207,11 @@ final class Benchmark {
         } catch (IOException e) {
             return "could not compare: " + e.getMessage();
         }
-        if (allSame) return "identical to the reference, byte for byte";
-        return String.format(Locale.US, "same length; largest difference %d steps of 24-bit, difference %.0f dB below the stem (worst stem)", worstLsb, worstDb);
+        lastDb = allSame ? Double.NEGATIVE_INFINITY : worstDb;
+        if (allSame) return "identical, byte for byte";
+        if (worstDb > MATCH_DB) return String.format(Locale.US, "WRONG OUTPUT: largest difference %d steps of 24-bit; the difference is %s the stem (worst stem)", worstLsb,
+            worstDb >= 0 ? String.format(Locale.US, "%.0f dB louder than", worstDb) : String.format(Locale.US, "only %.0f dB below", -worstDb));
+        return String.format(Locale.US, "matches: largest difference %d steps of 24-bit, %.0f dB below the stem (worst stem; float rounding)", worstLsb, -worstDb);
     }
 
     private static String report(String title, int start, Engine.Probe probe, List<Run> runs, Run placement, Run reference) {
@@ -221,7 +234,8 @@ final class Benchmark {
         b.append("Tail = 48 kHz conversion and writing that the serial way leaves until the end.\n");
         b.append("CPU % = the whole processor, all threads. VRAM and Shared = this run's own card memory, from DirectX.\n");
         b.append("Split = the model cut at the inverse STFT: the card runs the first part, the processor the last.\n");
-        b.append("Overlapped = the card starts the next section while the processor finishes the last one.\n\n");
+        b.append("Overlapped = the card starts the next section while the processor finishes the last one.\n");
+        b.append("Native iSTFT = the processor's part done by the engine's own FFT code instead of the model's.\n\n");
         b.append("Files against the reference run:\n");
         for (Run r : runs) if (r.ok && r != reference) b.append("  ").append(r.way.label()).append(": ").append(r.match).append('\n');
         boolean any = false;
@@ -238,8 +252,9 @@ final class Benchmark {
             for (String p : placement.placement) b.append("  ").append(p).append('\n');
         }
         Run best = null;
-        for (Run r : runs) if (r.ok && (r.match.isEmpty() || r.match.startsWith("identical") || r.match.startsWith("same length")) && (best == null || num(r.timing, "total") < num(best.timing, "total"))) best = r;
-        if (best != null) b.append(String.format(Locale.US, "%nFastest that matches the reference: %s, %.1f s.%n", best.way.label(), num(best.timing, "total")));
+        for (Run r : runs) if (r.ok && (r == reference || r.matchDb <= MATCH_DB) && (best == null || num(r.timing, "total") < num(best.timing, "total"))) best = r;
+        if (best != null && reference != null && reference.ok) b.append(String.format(Locale.US, "%nFastest that matches the reference (every stem within %.0f dB): %s, %.1f s (reference %.1f s, %.1fx).%n",
+            -MATCH_DB, best.way.label(), num(best.timing, "total"), num(reference.timing, "total"), num(reference.timing, "total") / num(best.timing, "total")));
         return b.toString();
     }
 

@@ -14,6 +14,7 @@
 #include <deque>
 #include <mutex>
 #include <functional>
+#include <complex>
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
@@ -248,6 +249,75 @@ std::string deviceName;
 std::string profilePrefix;   // --profile: ONNX Runtime writes a per-node timing file (which device ran each step)
 std::string tailPath;        // --tail: the model split in two; the tail (inverse STFT onwards) runs on the processor
 int tailThreads=4;
+bool nativeIstft=false;      // --native-istft: the tail done by the FFT code below instead of the model's tail
+void parallelFor(int n,int threads,const std::function<void(int)>&f);
+
+/**
+ * The model's tail done natively: HT-Demucs's inverse STFT (_ispec: n_fft 4096, hop 1024, periodic Hann,
+ * normalized, centred, cropped by 1536 samples) and the time branch added on. Checked against the model's
+ * own tail in CI; the model's tail stores its transform tables in half precision, so this is the more exact
+ * of the two (they differ by about 1.5e-4 of full scale at most). Input: the spectrum (1, 6, 2, 2, 2049, T:
+ * stem, channel, real/imaginary, bin, frame) and the time branch (1, 6, 2, length).
+ */
+class Istft {
+public:
+  static constexpr int N=4096,HOP=1024;
+  Istft():win_(N),tw_(N/2),rev_(N){
+    const double pi=3.14159265358979323846;
+    for(int n=0;n<N;n++)win_[n]=0.5-0.5*std::cos(2*pi*n/N);
+    for(int k=0;k<N/2;k++)tw_[k]=std::polar(1.0,2*pi*k/N);   // e^{+i}: the inverse transform
+    int bits=0;while((1<<bits)<N)bits++;
+    for(int i=0;i<N;i++){int r=0;for(int b=0;b<bits;b++)if(i&(1<<b))r|=1<<(bits-1-b);rev_[i]=r;}
+  }
+  /** Writes the six stems (planar stereo, `length` samples each) to out. */
+  void run(const float*z,int64_t frames,const float*xt,int64_t length,float*out,int threads)const{
+    const int64_t F=N/2+1,T=frames,total=N+int64_t(HOP)*(T-1),le=int64_t(HOP)*(T-1),pad=HOP/2*3;
+    if(pad+length>le)throw std::runtime_error("The split model's spectrum is shorter than its section");
+    // The window's overlap (the same for every stem): divided out after the overlap-add, as torch.istft does.
+    std::vector<double> inv(size_t(total),0.0);
+    for(int64_t t=0;t<T;t++)for(int n=0;n<N;n++)inv[size_t(t*HOP+n)]+=win_[n]*win_[n];
+    for(auto&v:inv)v=v>1e-11?1.0/v:1.0;
+    const double scale=std::sqrt(double(N))/N;   // normalized=True, and the inverse transform's 1/N
+    parallelFor(STEMS*2,threads,[&](int j){
+      const float*re=z+size_t(j)*2*F*T,*im=re+F*T;
+      std::vector<double> y(size_t(total),0.0);
+      std::vector<std::complex<double>> a(N);
+      // Two frames per transform: both outputs are real, so frame t goes in the real part and t+1 in the imaginary.
+      for(int64_t t=0;t<T;t+=2){
+        const bool two=t+1<T;
+        for(int64_t k=0;k<=N/2;k++){
+          const bool edge=k==0||k==N/2;   // the DC and Nyquist bins' imaginary parts are ignored, as irfft does
+          const std::complex<double> x1(re[k*T+t],edge?0.0:im[k*T+t]);
+          const std::complex<double> x2=two?std::complex<double>(re[k*T+t+1],edge?0.0:im[k*T+t+1]):0.0;
+          const std::complex<double> i(0,1);
+          a[size_t(k)]=x1+i*x2;
+          if(!edge)a[size_t(N-k)]=std::conj(x1)+i*std::conj(x2);
+        }
+        fft(a);
+        double*y1=y.data()+t*HOP;
+        for(int n=0;n<N;n++)y1[n]+=a[size_t(n)].real()*scale*win_[n];
+        if(two){double*y2=y1+HOP;for(int n=0;n<N;n++)y2[n]+=a[size_t(n)].imag()*scale*win_[n];}
+      }
+      float*o=out+size_t(j)*length;
+      const float*x=xt+size_t(j)*length;
+      for(int64_t i=0;i<length;i++){const size_t at=size_t(N/2+pad+i);o[i]=float(y[at]*inv[at]+x[i]);}
+    });
+  }
+private:
+  std::vector<double> win_;
+  std::vector<std::complex<double>> tw_;
+  std::vector<int> rev_;
+  void fft(std::vector<std::complex<double>>&a)const{   // in place, radix 2, e^{+i}, not scaled
+    for(int i=0;i<N;i++)if(i<rev_[i])std::swap(a[size_t(i)],a[size_t(rev_[i])]);
+    for(int len=2;len<=N;len<<=1){
+      const int half=len/2,step=N/len;
+      for(int i=0;i<N;i+=len)for(int k=0;k<half;k++){
+        const std::complex<double> u=a[size_t(i+k)],v=a[size_t(i+k+half)]*tw_[size_t(k*step)];
+        a[size_t(i+k)]=u+v;a[size_t(i+k+half)]=u-v;
+      }
+    }
+  }
+};
 
 class Model {
 public:
@@ -353,6 +423,7 @@ public:
   }
   /** Runs the tail on what head() returned; returns the six stems (planar stereo), and frees the hand-off. */
   std::vector<float> tail(Handoff&h,double*seconds=nullptr){
+    if(nativeIstft)return tailNative(h,seconds);
     const int64_t shape[]{1,2,int64_t(SEGMENT)};
     OrtValue*input=nullptr;
     check(api->CreateTensorWithDataAsOrtValue(memory,h.input.data(),h.input.size()*sizeof(float),shape,3,ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,&input));
@@ -387,6 +458,34 @@ public:
     return r;
   }
   void release(Handoff&h){for(auto*v:h.values)if(v)api->ReleaseValue(v);h.values.clear();}
+  /** The tail by the native inverse STFT: the spectrum is the 6-D hand-off, the time branch the 4-D one. */
+  std::vector<float> tailNative(Handoff&h,double*seconds){
+    const float*z=nullptr,*xt=nullptr;
+    int64_t frames=0,length=0;
+    try{
+      for(auto*v:h.values){
+        OrtTensorTypeAndShapeInfo*info=nullptr;
+        check(api->GetTensorTypeAndShape(v,&info));
+        size_t n=0;OrtStatus*st=api->GetDimensionsCount(info,&n);
+        std::vector<int64_t> d(n);
+        if(!st)st=api->GetDimensions(info,d.data(),n);
+        api->ReleaseTensorTypeAndShapeInfo(info);
+        check(st);
+        float*data=nullptr;
+        check(api->GetTensorMutableData(v,reinterpret_cast<void**>(&data)));
+        if(n==6&&d[1]==STEMS&&d[2]==2&&d[3]==2&&d[4]==Istft::N/2+1){z=data;frames=d[5];}
+        else if(n==4&&d[1]==STEMS&&d[2]==2){xt=data;length=d[3];}
+      }
+      if(!z||!xt||length!=int64_t(SEGMENT))throw std::runtime_error("The split model's head does not hand over a spectrum and a time branch");
+      static const Istft istft;
+      std::vector<float> r(SEGMENT*2*STEMS);
+      const auto t=std::chrono::steady_clock::now();
+      istft.run(z,frames,xt,length,r.data(),tailThreads);
+      if(seconds)*seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-t).count();
+      release(h);
+      return r;
+    }catch(...){release(h);throw;}
+  }
   ~Model(){
     if(profiling)endProfiling();
     if(tailSession)api->ReleaseSession(tailSession);
@@ -1345,6 +1444,7 @@ int run(int argc,char**argv){
   const std::string mode=arg(argc,argv,"--mode","serial"),gpuWay=arg(argc,argv,"--gpu-way","auto");
   profilePrefix=arg(argc,argv,"--profile","");
   tailPath=arg(argc,argv,"--tail","");
+  for(int i=1;i<argc;i++)nativeIstft|=strcmp(argv[i],"--native-istft")==0;
   bool monitorOn=false;
   for(int i=1;i<argc;i++)monitorOn|=strcmp(argv[i],"--monitor")==0;
   const int cores=int(std::max(1u,std::thread::hardware_concurrency()));
