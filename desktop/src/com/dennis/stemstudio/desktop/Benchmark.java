@@ -39,6 +39,8 @@ final class Benchmark {
         List<Way> w = new ArrayList<>();
         w.add(new Way("Processor, serial (reference)", List.of("--device", "cpu", "--mode", "serial"), false));
         w.add(new Way("Processor, pipelined", List.of("--device", "cpu", "--mode", "pipelined"), false));
+        // The processor alone with the model's slow inverse STFT replaced (CI: 58 s down to 49 s on 4 threads).
+        if (canSplit()) w.add(new Way("Processor, native iSTFT", List.of("--device", "cpu", "--mode", "pipelined", "--native-istft"), false, true));
         if (hasGpu && canSplit()) {
             // The model split in two: everything up to the inverse STFT on the card, the rest on the processor.
             // Fused DirectML gave corrupted stems on Dennis's RTX 3050 (+64 dB difference); one run keeps checking.
