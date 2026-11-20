@@ -381,7 +381,7 @@ public:
       char*o=nullptr;check(api->SessionGetOutputName(session,i,allocator,&o));headOutputs.push_back(o);check(api->AllocatorFree(allocator,o));
     }
     outputName=headOutputs.at(0);
-    if(!tailPath.empty()){
+    if(!tailPath.empty()&&!nativeIstft){
       // The tail always runs on the processor, with its own threads.
       check(api->CreateSessionOptions(&tailOptions));
       check(api->SetIntraOpNumThreads(tailOptions,tailThreads));
@@ -401,7 +401,7 @@ public:
       char*o=nullptr;check(api->SessionGetOutputName(tailSession,0,allocator,&o));outputName=o;check(api->AllocatorFree(allocator,o));
     }
   }
-  bool split()const{return tailSession!=nullptr;}
+  bool split()const{return tailSession!=nullptr||nativeIstft;}
   /** What the head hands the tail for one section (owned; give it to tail()). */
   struct Handoff{std::vector<OrtValue*> values;std::vector<float> input;double headSeconds=0;};
   Handoff head(const std::vector<float>&stereo){
@@ -625,6 +625,7 @@ double since(Clock::time_point t){return std::chrono::duration<double>(Clock::no
 struct Timing{
   double load=0,downsample=0,sections=0,infer=0,inferGpu=0,inferCpu=0,assemble=0,upsample=0,tail=0,write=0,total=0;
   double splitHead=0,splitTail=0;   // the split model: time in the card's part and the processor's part
+  double session=0;                 // opening the model (the AI runtime prepares it for the device): part of sections
   int gpuSections=0,cpuSections=0;
 } timing;
 
@@ -832,7 +833,9 @@ std::array<std::string,STEMS+1> extract(const std::string&modelPath,const std::s
       files[s]=openFile(scratch.model[s],"wb");
       if(!files[s])throw std::runtime_error("Cannot create temporary stem");
     }
+    const auto sessionBegan=Clock::now();
     Model model(modelPath,threads,useGpu);
+    timing.session=since(sessionBegan);
     std::vector<float> weight(SEGMENT),sum(SEGMENT,0.f),in(SEGMENT*2);
     for(size_t i=0;i<SEGMENT;i++)weight[i]=float(std::min(i+1,SEGMENT-i));
     std::array<std::vector<float>,STEMS*2> held;
@@ -1191,9 +1194,11 @@ std::array<std::string,STEMS+1> extractPipelined(const std::string&modelPath,con
   };
 
   const auto sectionsBegan=Clock::now();
+  const auto sessionBegan=Clock::now();
   std::unique_ptr<Model> first(new Model(modelPath,plan.inferThreads,plan.primary));
   std::unique_ptr<Model> second;
   if(plan.parallel)second.reset(new Model(modelPath,plan.cpuThreads,0));
+  timing.session=since(sessionBegan);
   std::vector<std::thread> workers;
   tailLane=first->split()&&plan.primary!=0;
   bool headsDone=false;
@@ -1505,9 +1510,9 @@ int run(int argc,char**argv){
       }catch(...){monitor.stop();throw;}
       const Monitor::Stats st=monitor.stop();
       for(int s=0;s<STEMS;s++)say("STEM %s %s\n",NAMES[s],results[s].c_str());
-      say("TIMING mode=%s device=%s load=%.2f downsample=%.2f sections=%.2f infer=%.2f infer_first=%.2f infer_second=%.2f first_sections=%d second_sections=%d assemble=%.2f upsample=%.2f write=%.2f total=%.2f split_head=%.2f split_tail=%.2f\n",
+      say("TIMING mode=%s device=%s load=%.2f downsample=%.2f sections=%.2f infer=%.2f infer_first=%.2f infer_second=%.2f first_sections=%d second_sections=%d assemble=%.2f upsample=%.2f write=%.2f total=%.2f split_head=%.2f split_tail=%.2f session=%.2f\n",
         mode.c_str(),gpu==0?"cpu":gpu==2?"gpu-fused":gpu==3?"gpu-unfused":"gpu-adapter",timing.load,timing.downsample,timing.sections,timing.infer,timing.inferGpu,timing.inferCpu,
-        timing.gpuSections,timing.cpuSections,timing.assemble,timing.upsample,timing.write,timing.total,timing.splitHead,timing.splitTail);
+        timing.gpuSections,timing.cpuSections,timing.assemble,timing.upsample,timing.write,timing.total,timing.splitHead,timing.splitTail,timing.session);
       say("STATS cpu_avg=%.0f cpu_max=%.0f proc_cpu_avg=%.0f gpu_avg=%.0f gpu_max=%.0f vram_peak=%ld shared_peak=%ld gpu_used_peak=%ld ram_peak=%ld temp_start=%ld temp_max=%ld power_max=%ld samples=%d\n",
         st.cpuAvg,st.cpuMax,st.procCpuAvg,st.gpuAvg,st.gpuMax,st.vramPeak,st.sharedPeak,st.gpuUsedPeak,st.ramPeak,st.tempStart,st.tempMax,st.powerMax,st.samples);
       say("DONE %s\n",results[STEMS].c_str());

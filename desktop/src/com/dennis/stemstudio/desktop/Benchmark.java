@@ -25,32 +25,43 @@ import java.util.function.Consumer;
 final class Benchmark {
     private Benchmark() {}
 
-    record Way(String label, List<String> args, boolean gpu, boolean split) {
-        Way(String label, List<String> args, boolean gpu) { this(label, args, gpu, false); }
+    record Way(String label, List<String> args, boolean gpu, boolean split, boolean optimised) {
+        Way(String label, List<String> args, boolean gpu) { this(label, args, gpu, false, false); }
+        Way(String label, List<String> args, boolean gpu, boolean split) { this(label, args, gpu, split, false); }
     }
 
     /** The model split at the inverse STFT: the head for the card, the tail for the processor (built by CI). */
     static File head() { return new File(Engine.model().getParentFile(), "htdemucs_6s_head.onnx"); }
     static File tail() { return new File(Engine.model().getParentFile(), "htdemucs_6s_tail.onnx"); }
     static boolean canSplit() { return head().isFile() && tail().isFile(); }
+    /** The head with the runtime's basic, device-independent optimisations done once at build time (CI checks it gives the same output). */
+    static File optimisedHead() { return new File(Engine.model().getParentFile(), "htdemucs_6s_head_opt.onnx"); }
 
-    /** The runs, in order. Card runs get a cool-down first, so heat from one run does not slow the next. */
+    /**
+     * The runs, in order. Every run after the first gets a cool-down, and the reference runs again at the end:
+     * a laptop slows as it heats, and the repeat shows how much (Dennis's second report: the processor runs got
+     * slower one after another, 53 s, 55 s, 67 s, with no rest between them).
+     * Dropped after two reports on Dennis's laptop: the split without the native inverse STFT (superseded, 18.3 s
+     * against 13.0 s), the card with processor sections (19.4 s, slower), and the serial native card run
+     * (byte-identical to the overlapped one twice).
+     */
     static List<Way> ways(boolean hasGpu) {
         List<Way> w = new ArrayList<>();
+        boolean opt = optimisedHead().isFile();
         w.add(new Way("Processor, serial (reference)", List.of("--device", "cpu", "--mode", "serial"), false));
         w.add(new Way("Processor, pipelined", List.of("--device", "cpu", "--mode", "pipelined"), false));
-        // The processor alone with the model's slow inverse STFT replaced (CI: 58 s down to 49 s on 4 threads).
-        if (canSplit()) w.add(new Way("Processor, native iSTFT", List.of("--device", "cpu", "--mode", "pipelined", "--native-istft"), false, true));
-        if (hasGpu && canSplit()) {
-            // The model split in two: everything up to the inverse STFT on the card, the rest on the processor.
-            // Fused DirectML gave corrupted stems on Dennis's RTX 3050 (+64 dB difference); one run keeps checking.
-            w.add(new Way("Split unfused, serial", List.of("--device", "gpu", "--gpu-way", "unfused", "--mode", "serial"), true, true));
-            w.add(new Way("Split unfused, overlapped", List.of("--device", "gpu", "--gpu-way", "unfused", "--mode", "pipelined"), true, true));
-            w.add(new Way("Split unfused, native iSTFT", List.of("--device", "gpu", "--gpu-way", "unfused", "--mode", "serial", "--native-istft"), true, true));
-            w.add(new Way("Split unfused, native, overlapped", List.of("--device", "gpu", "--gpu-way", "unfused", "--mode", "pipelined", "--native-istft"), true, true));
-            w.add(new Way("Split unfused + CPU sections", List.of("--device", "gpu", "--gpu-way", "unfused", "--mode", "parallel", "--native-istft"), true, true));
-            w.add(new Way("Split fused, serial (check)", List.of("--device", "gpu", "--gpu-way", "fused", "--mode", "serial"), true, true));
+        if (canSplit()) {
+            w.add(new Way("Processor, native iSTFT", List.of("--device", "cpu", "--mode", "pipelined", "--native-istft"), false, true));
+            if (opt) w.add(new Way("Processor, native, optimised", List.of("--device", "cpu", "--mode", "pipelined", "--native-istft"), false, true, true));
         }
+        if (hasGpu && canSplit()) {
+            // Everything up to the inverse STFT on the card, the inverse STFT by the engine's own code.
+            // Fused DirectML gave corrupted stems on Dennis's RTX 3050 (+64 dB difference); one run keeps checking.
+            w.add(new Way("Card, native, overlapped", List.of("--device", "gpu", "--gpu-way", "unfused", "--mode", "pipelined", "--native-istft"), true, true));
+            if (opt) w.add(new Way("Card, native, overl., optimised", List.of("--device", "gpu", "--gpu-way", "unfused", "--mode", "pipelined", "--native-istft"), true, true, true));
+            w.add(new Way("Card fused (check)", List.of("--device", "gpu", "--gpu-way", "fused", "--mode", "serial"), true, true));
+        }
+        w.add(new Way("Processor, serial (repeat)", List.of("--device", "cpu", "--mode", "serial"), false));
         return w;
     }
 
@@ -90,9 +101,9 @@ final class Benchmark {
         Run reference = null;
         for (int i = 0; i < ways.size() && !stopped; i++) {
             Way way = ways.get(i);
-            if (way.gpu() && i > 0) {
-                for (int s = 20; s > 0 && !stopped; s--) {
-                    said.accept("Cooling the card before run " + (i + 1) + " of " + ways.size() + " (" + s + " s)");
+            if (i > 0) {
+                for (int s = 30; s > 0 && !stopped; s--) {
+                    said.accept("Cooling down before run " + (i + 1) + " of " + ways.size() + " (" + s + " s)");
                     try { Thread.sleep(1000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new IOException("Stopped"); }
                 }
             }
@@ -104,7 +115,8 @@ final class Benchmark {
             // The card's own reference: the pipelined and parallel card runs against the card's serial run.
             // Each overlapped split run against the serial split run on the same card way (same devices, so any
             // difference is the overlapping's).
-            String serialLabel = r.way.label().replace("native, overlapped", "native iSTFT").replace("overlapped", "serial").replace(" + CPU sections", ", native iSTFT");
+            // The optimised model against the same way without it (same device, so any difference is the optimisation's).
+            String serialLabel = r.way.label().replace("Processor, native, optimised", "Processor, native iSTFT").replace("Card, native, overl., optimised", "Card, native, overlapped");
             Run cardSerial = runs.stream().filter(x -> x.way.label().equals(serialLabel) && x.ok).findFirst().orElse(null);
             if (r.ok && cardSerial != null && r != cardSerial) r.match2 = compare(cardSerial.stems, r.stems);
         }
@@ -124,7 +136,7 @@ final class Benchmark {
     private static Run one(Way way, File wav, File out, int start, int seconds, Consumer<String> lines) {
         Run r = new Run(way);
         out.mkdirs();
-        List<String> cmd = new ArrayList<>(List.of(Engine.exe().getAbsolutePath(), "--model", (way.split() ? head() : Engine.model()).getAbsolutePath(), "--in", wav.getAbsolutePath(),
+        List<String> cmd = new ArrayList<>(List.of(Engine.exe().getAbsolutePath(), "--model", (way.optimised() ? optimisedHead() : way.split() ? head() : Engine.model()).getAbsolutePath(), "--in", wav.getAbsolutePath(),
             "--out", out.getAbsolutePath(), "--prefix", "b", "--start", String.valueOf(start), "--seconds", String.valueOf(seconds), "--monitor", "--watch-stdin"));
         cmd.addAll(way.args());
         if (way.split()) cmd.addAll(List.of("--tail", tail().getAbsolutePath()));
@@ -222,17 +234,18 @@ final class Benchmark {
         b.append(String.format(Locale.US, "%s, 60 s from %d s. %s, %d processor threads.%n", title, start,
             probe.hasGpu() ? probe.gpu() + " (" + probe.gpuMb() + " MB)" : "No graphics card", probe.cores()));
         b.append("Same model (HT-Demucs 6s), same sections, weights and output for every run.\n\n");
-        b.append(String.format(Locale.US, "%-32s %8s %8s %8s %8s %6s %6s %7s %7s %8s %6s%n", "Run", "Total s", "AI s", "Tail s", "CPU %", "GPU %", "GPU max",
+        b.append(String.format(Locale.US, "%-32s %8s %7s %8s %8s %8s %6s %6s %7s %7s %8s %6s%n", "Run", "Total s", "Open s", "AI s", "Tail s", "CPU %", "GPU %", "GPU max",
             "VRAM MB", "Shared", "RAM MB", "Temp"));
         for (Run r : runs) {
             if (!r.ok) { b.append(String.format(Locale.US, "%-32s did not run: %s%n", r.way.label(), Studio.plain(r.error))); continue; }
             // Serial converts to 48 kHz after the last section; pipelined does it while the model works.
             double tail = "serial".equals(r.timing.get("mode")) ? num(r.timing, "upsample") + num(r.timing, "write") : num(r.timing, "write");
-            b.append(String.format(Locale.US, "%-32s %8.1f %8.1f %8.1f %8s %6s %6s %7s %7s %8s %6s%n", r.way.label(), num(r.timing, "total"), num(r.timing, "infer"), tail,
+            b.append(String.format(Locale.US, "%-32s %8.1f %7.1f %8.1f %8.1f %8s %6s %6s %7s %7s %8s %6s%n", r.way.label(), num(r.timing, "total"), num(r.timing, "session"), num(r.timing, "infer"), tail,
                 r.stats.getOrDefault("cpu_avg", "-"), na(r.stats.get("gpu_avg")), na(r.stats.get("gpu_max")), na(r.stats.get("vram_peak")), na(r.stats.get("shared_peak")),
                 r.stats.getOrDefault("ram_peak", "-"), r.stats.containsKey("temp_max") && !"-1".equals(r.stats.get("temp_max")) ? r.stats.get("temp_start") + "→" + r.stats.get("temp_max") : "-"));
         }
-        b.append("\nTotal = the engine's own time from opening the song to the last file. AI = time inside the model.\n");
+        b.append("\nTotal = the engine's own time from opening the song to the last file. Open = the AI runtime preparing the model\n");
+        b.append("for the device (part of Total). AI = time inside the model. Optimised = the model's basic optimisations done at build time.\n");
         b.append("Tail = 48 kHz conversion and writing that the serial way leaves until the end.\n");
         b.append("CPU % = the whole processor, all threads. VRAM and Shared = this run's own card memory, from DirectX.\n");
         b.append("Split = the model cut at the inverse STFT: the card runs the first part, the processor the last.\n");
@@ -242,7 +255,7 @@ final class Benchmark {
         for (Run r : runs) if (r.ok && r != reference) b.append("  ").append(r.way.label()).append(": ").append(r.match).append('\n');
         boolean any = false;
         for (Run r : runs) if (!r.match2.isEmpty()) {
-            if (!any) { b.append("Against the card's own serial run (same device, so any difference is the pipeline's):\n"); any = true; }
+            if (!any) { b.append("Optimised model against the same way without it (same device, so any difference is the optimisation's):\n"); any = true; }
             b.append("  ").append(r.way.label()).append(": ").append(r.match2).append('\n');
         }
         b.append("\nStage times (seconds):\n");

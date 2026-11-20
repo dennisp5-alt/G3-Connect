@@ -84,6 +84,9 @@ jobs:
           pip install --disable-pip-version-check -q numpy scipy onnx onnxruntime
           python experiments/hybrid/split_model.py build/app/models/htdemucs_6s.onnx build/app/models/htdemucs_6s_head.onnx build/app/models/htdemucs_6s_tail.onnx | tee split.txt
           grep -q SPLIT_PASS split.txt
+          # The head with the basic (device-independent) optimisations done here once, for a quicker open.
+          python experiments/hybrid/optimise_head.py build/app/models/htdemucs_6s_head.onnx build/app/models/htdemucs_6s_head_opt.onnx | tee -a split.txt
+          grep -q OPTIMISE_PASS split.txt
           ls -la build/app/models
 
       - name: Test song (synthetic, 70 seconds, 48 kHz)
@@ -117,6 +120,9 @@ jobs:
             $E --model build/app/models/htdemucs_6s_head.onnx --tail build/app/models/htdemucs_6s_tail.onnx --native-istft --in song.wav --out out-native-$m --prefix m --device cpu --mode $m --seconds 60 --monitor | grep -E '^(TIMING|STATS|ERROR|DONE)' | tee -a modes.txt
             python experiments/hybrid/compare_wavs.py out-split out-native-$m native-$m -50 | tee -a modes.txt
           done
+          mkdir -p out-native-opt
+          $E --model build/app/models/htdemucs_6s_head_opt.onnx --native-istft --in song.wav --out out-native-opt --prefix m --device cpu --mode pipelined --seconds 60 --monitor | grep -E '^(TIMING|STATS|ERROR|DONE)' | tee -a modes.txt
+          python experiments/hybrid/compare_wavs.py out-native-pipelined out-native-opt native-optimised -50 | tee -a modes.txt
           python experiments/six-stem/check_sum.py song.wav out-native-serial m | tee -a modes.txt
 
       - name: The app's benchmark, as the button runs it
