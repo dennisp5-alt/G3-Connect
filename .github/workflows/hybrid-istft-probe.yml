@@ -1,0 +1,31 @@
+name: Stem Studio hybrid iSTFT probe
+
+# Experimental and quick (Linux, processor only): what the split model's tail computes, so the engine
+# can do the inverse STFT natively. Downloads the model inside the run; nothing is committed or published.
+on:
+  workflow_dispatch:
+  push:
+    branches: ['experiment/hybrid-processing']
+    paths:
+      - 'experiments/hybrid/istft_probe.py'
+      - '.github/workflows/hybrid-istft-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Model, split, probe
+        run: |
+          pip install --disable-pip-version-check -q numpy onnx onnxruntime
+          mkdir -p m
+          curl -sSL --retry 3 -o m/full.onnx 'https://huggingface.co/StemSplitio/htdemucs-6s-onnx/resolve/main/htdemucs_6s_fp16weights.onnx'
+          python experiments/hybrid/split_model.py m/full.onnx m/head.onnx m/tail.onnx | grep -E 'SPLIT|BOUNDARY|TAIL steps|CROSSES'
+          python experiments/hybrid/istft_probe.py m/head.onnx m/tail.onnx
