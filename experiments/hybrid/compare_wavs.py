@@ -19,7 +19,10 @@ for f in sorted(glob.glob(os.path.join(ref, '*.wav'))):
     if len(x) != len(y):
         sys.exit(f'COMPARE {label}: length differs on {os.path.basename(f)}')
     d = np.abs(x - y); worst_lsb = max(worst_lsb, int(d.max()))
-    worst_db = max(worst_db, 10 * np.log10(np.sum(d.astype(np.float64) ** 2) / max(1, np.sum(x.astype(np.float64) ** 2))))
+    db = 10 * np.log10(np.sum(d.astype(np.float64) ** 2) / max(1, np.sum(x.astype(np.float64) ** 2)))
+    peak = 20 * np.log10(max(1, int(np.abs(x).max())) / 8388608)
+    print(f'  {os.path.basename(f)}: largest {int(d.max())} steps ({20 * np.log10(max(1, int(d.max())) / 8388608):.0f} dBFS), {db:.1f} dB relative to the stem (stem peak {peak:.0f} dBFS)')
+    worst_db = max(worst_db, db)
 print(f'COMPARE {label}: {same} of 6 identical; largest difference {worst_lsb} steps of 24-bit, worst stem difference {worst_db:.1f} dB relative to the stem')
 if limit is not None and worst_db > limit:
     sys.exit(f'COMPARE_FAIL {label}: above {limit} dB')
